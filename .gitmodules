@@ -1,0 +1,3 @@
+[submodule "resource-types-contrib"]
+	path = resource-types-contrib
+	url = https://github.com/radius-project/resource-types-contrib.git
