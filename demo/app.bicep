@@ -24,8 +24,10 @@ resource app 'Applications.Core/applications@2023-10-01-preview' = {
 }
 
 // Store GHCR credentials as a Radius secret (creates a K8s Secret).
-var authString = base64('${ghcrUsername}:${ghcrPassword}')
-var dockerConfigJson = '{"auths":{"ghcr.io":{"username":"${ghcrUsername}","password":"${ghcrPassword}","auth":"${authString}"}}}'
+// The secrets recipe base64-encodes string values into K8s secret .data.
+// Using encoding: 'base64' puts the value directly into binary_data, which
+// K8s mounts as raw bytes — exactly what BuildKit expects for config.json.
+var dockerConfigJson = '{"auths":{"ghcr.io":{"username":"${ghcrUsername}","password":"${ghcrPassword}"}}}'
 
 resource ghcrCredentials 'Radius.Security/secrets@2025-08-01-preview' = {
   name: 'ghcr-credentials'
@@ -35,7 +37,8 @@ resource ghcrCredentials 'Radius.Security/secrets@2025-08-01-preview' = {
     kind: 'generic'
     data: {
       '.dockerconfigjson': {
-        value: dockerConfigJson
+        encoding: 'base64'
+        value: base64(dockerConfigJson)
       }
     }
   }
