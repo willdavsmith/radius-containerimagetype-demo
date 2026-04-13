@@ -1,0 +1,197 @@
+name: E2E Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CLUSTER_NAME: radius-e2e
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # Only run on trusted events (GITHUB_TOKEN needs packages:write for GHCR push)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Derive image name
+        id: image
+        run: |
+          # GHCR requires lowercase
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=ghcr.io/${OWNER}/containerimagesdemo:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Cluster setup ────────────────────────────────────────────
+
+      - name: Install k3d
+        run: curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+
+      - name: Create k3d cluster
+        run: |
+          k3d cluster create $CLUSTER_NAME \
+            --volume "${{ github.workspace }}/demo/app:/app/demo" \
+            --wait
+
+      - name: Install Radius CLI
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/radius-project/radius/main/deploy/install.sh" | /bin/bash
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Install Radius
+        run: |
+          rad install kubernetes
+          kubectl wait --for=condition=available deployment --all -n radius-system --timeout=120s
+
+      - name: Patch dynamic-rp RBAC for batch/jobs
+        run: |
+          kubectl patch clusterrole dynamic-rp --type=json -p='[
+            {
+              "op": "add",
+              "path": "/rules/-",
+              "value": {
+                "apiGroups": ["batch"],
+                "resources": ["jobs", "jobs/status"],
+                "verbs": ["create", "delete", "get", "list", "patch", "update", "watch"]
+              }
+            }
+          ]'
+          kubectl rollout restart deployment/dynamic-rp -n radius-system
+          kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=60s
+
+      # ── Radius setup ─────────────────────────────────────────────
+
+      - name: Create resource group, environment, and workspace
+        run: |
+          rad group create default
+          rad environment create default --group default
+          rad workspace create kubernetes default \
+            --context "$(kubectl config current-context)" \
+            --environment default \
+            --group default
+
+      - name: Register resource types
+        run: make register-types
+
+      - name: Build Bicep extensions
+        run: make build
+
+      - name: Register Terraform recipes
+        run: |
+          # containerImages — pin to this commit
+          rad recipe register default \
+            --resource-type Radius.Compute/containerImages \
+            --template-kind terraform \
+            --template-path "git::https://github.com/${{ github.repository }}.git?ref=${{ github.sha }}//resource-types/Compute/containerImages/recipes/kubernetes/terraform"
+
+          # containers — from resource-types-contrib (pinned to submodule commit)
+          SUBMODULE_SHA=$(git -C resource-types-contrib rev-parse HEAD)
+          rad recipe register default \
+            --resource-type Radius.Compute/containers \
+            --template-kind terraform \
+            --template-path "git::https://github.com/radius-project/resource-types-contrib.git?ref=${SUBMODULE_SHA}//Compute/containers/recipes/kubernetes/terraform"
+
+          # secrets — from resource-types-contrib (pinned to submodule commit)
+          rad recipe register default \
+            --resource-type Radius.Security/secrets \
+            --template-kind terraform \
+            --template-path "git::https://github.com/radius-project/resource-types-contrib.git?ref=${SUBMODULE_SHA}//Security/secrets/recipes/kubernetes/terraform"
+
+      # ── Deploy ───────────────────────────────────────────────────
+
+      - name: Deploy application
+        working-directory: demo
+        run: |
+          rad deploy app.bicep \
+            -p ghcrUsername="${{ github.actor }}" \
+            -p ghcrPassword="${{ secrets.GITHUB_TOKEN }}" \
+            -p image="${{ steps.image.outputs.name }}"
+
+      # ── Verify ───────────────────────────────────────────────────
+
+      - name: Verify build job completed
+        run: |
+          NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2)
+          echo "Namespace: $NS"
+          kubectl get jobs -n "$NS"
+          kubectl get jobs -n "$NS" -o jsonpath='{.items[0].status.succeeded}' | grep -q 1
+          echo "✅ Build job completed successfully"
+
+      - name: Verify container is running
+        run: |
+          NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2)
+          kubectl wait --for=condition=available deployment/demo -n "$NS" --timeout=120s
+          echo "✅ Container deployment is available"
+
+      - name: Verify app responds
+        run: |
+          NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2)
+          kubectl port-forward -n "$NS" deployment/demo 3000:3000 &
+          PF_PID=$!
+          sleep 5
+          RESPONSE=$(curl -sf http://localhost:3000)
+          kill $PF_PID || true
+          echo "Response: $RESPONSE"
+          echo "$RESPONSE" | grep -q "Hello"
+          echo "✅ App responded correctly"
+
+      - name: Make GHCR package public
+        if: success()
+        continue-on-error: true
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          gh api -X PATCH "/user/packages/container/containerimagesdemo" \
+            -f visibility=public 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Diagnostics & cleanup ────────────────────────────────────
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods --all-namespaces
+          echo ""
+          echo "=== Jobs ==="
+          kubectl get jobs --all-namespaces
+          echo ""
+          NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2 || echo "unknown")
+          if [ "$NS" != "unknown" ]; then
+            echo "=== Pod logs in $NS ==="
+            kubectl logs --all-containers --tail=50 -n "$NS" -l "radapp.io/resource" 2>/dev/null || true
+            echo ""
+            echo "=== Pod descriptions ==="
+            kubectl describe pods -n "$NS" 2>/dev/null || true
+          fi
+          echo ""
+          echo "=== Radius recipes ==="
+          rad recipe list 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rad application delete demo 2>/dev/null || true
+          k3d cluster delete $CLUSTER_NAME 2>/dev/null || true

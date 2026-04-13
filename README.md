@@ -175,3 +175,16 @@ The Terraform Kubernetes provider has built-in wait behavior:
 | `kubernetes_job_v1` | `wait_for_completion = true` (waits for Job) | Returns immediately |
 
 See `repro/` for a full reproduction of this issue.
+
+## CI/CD
+
+The repo includes a GitHub Actions workflow (`.github/workflows/e2e.yaml`) that runs the
+full E2E test on every push to `main` and on PRs:
+
+1. Creates a k3d cluster with the demo app source mounted
+2. Installs Radius and registers all resource types + Terraform recipes
+3. Deploys the application using `GITHUB_TOKEN` for GHCR authentication
+4. Verifies the build Job completed, the container is running, and the app responds
+
+The workflow uses `GITHUB_TOKEN` (with `packages: write`) — no additional secrets needed.
+Recipe references are pinned to the exact commit SHA to ensure CI validates the code under test.
