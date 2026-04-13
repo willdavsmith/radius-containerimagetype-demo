@@ -104,20 +104,20 @@ jobs:
           rad recipe register default \
             --resource-type Radius.Compute/containerImages \
             --template-kind terraform \
-            --template-path "git::https://github.com/${{ github.repository }}.git?ref=${{ github.sha }}//resource-types/Compute/containerImages/recipes/kubernetes/terraform"
+            --template-path "git::https://github.com/${{ github.repository }}.git//resource-types/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}"
 
           # containers — from resource-types-contrib (pinned to submodule commit)
           SUBMODULE_SHA=$(git -C resource-types-contrib rev-parse HEAD)
           rad recipe register default \
             --resource-type Radius.Compute/containers \
             --template-kind terraform \
-            --template-path "git::https://github.com/radius-project/resource-types-contrib.git?ref=${SUBMODULE_SHA}//Compute/containers/recipes/kubernetes/terraform"
+            --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${SUBMODULE_SHA}"
 
           # secrets — from resource-types-contrib (pinned to submodule commit)
           rad recipe register default \
             --resource-type Radius.Security/secrets \
             --template-kind terraform \
-            --template-path "git::https://github.com/radius-project/resource-types-contrib.git?ref=${SUBMODULE_SHA}//Security/secrets/recipes/kubernetes/terraform"
+            --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform?ref=${SUBMODULE_SHA}"
 
       # ── Deploy ───────────────────────────────────────────────────
 
