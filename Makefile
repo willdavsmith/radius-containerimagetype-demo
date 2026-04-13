@@ -32,10 +32,12 @@ register-types: ## Register all resource types with Radius
 	@for folder in $(RTC_TYPES); do \
 		yaml=$$(find "$(RTC_DIR)/$$folder" -maxdepth 1 -name "*.yaml" | head -1); \
 		echo "    $$yaml"; \
-		rad resource-type create -f "$$yaml"; \
+		rad resource-type create -f "$$yaml" || \
+			(echo "    Retrying after 5s..." && sleep 5 && rad resource-type create -f "$$yaml"); \
 	done
 	@echo "==> Registering containerImages resource type..."
-	@rad resource-type create -f "$(RT_DIR)/Compute/containerImages/containerImages.yaml"
+	@rad resource-type create -f "$(RT_DIR)/Compute/containerImages/containerImages.yaml" || \
+		(echo "    Retrying after 5s..." && sleep 5 && rad resource-type create -f "$(RT_DIR)/Compute/containerImages/containerImages.yaml")
 	@echo "✅ Resource types registered"
 
 register-recipes: ## Register Terraform recipes with the default environment
