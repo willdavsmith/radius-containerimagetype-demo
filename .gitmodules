@@ -1,3 +1,6 @@
 [submodule "resource-types-contrib"]
 	path = resource-types-contrib
 	url = https://github.com/radius-project/resource-types-contrib.git
+[submodule "radius"]
+	path = radius
+	url = https://github.com/radius-project/radius.git
