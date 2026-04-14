@@ -22,19 +22,19 @@ variable "context" {
 }
 
 variable "ghcr_server" {
-  description = "Registry server (e.g., ghcr.io). Set via TF_VAR_ghcr_server on dynamic-rp."
+  description = "Registry server (e.g., ghcr.io). Set via recipe parameters."
   type        = string
   default     = "ghcr.io"
 }
 
 variable "ghcr_username" {
-  description = "Registry username. Set via TF_VAR_ghcr_username on dynamic-rp."
+  description = "Registry username. Set via recipe parameters."
   type        = string
   default     = ""
 }
 
 variable "ghcr_token" {
-  description = "Registry token/PAT. Set via TF_VAR_ghcr_token on dynamic-rp."
+  description = "Registry token/PAT. Set via recipe parameters."
   type        = string
   default     = ""
   sensitive   = true

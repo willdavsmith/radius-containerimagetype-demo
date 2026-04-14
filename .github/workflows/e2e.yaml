@@ -71,13 +71,6 @@ jobs:
               }
             }
           ]'
-
-      - name: Configure registry credentials on dynamic-rp
-        run: |
-          kubectl set env deployment/dynamic-rp -n radius-system \
-            TF_VAR_ghcr_server=ghcr.io \
-            TF_VAR_ghcr_username="${{ github.actor }}" \
-            TF_VAR_ghcr_token="${{ secrets.GITHUB_TOKEN }}"
           kubectl rollout restart deployment/dynamic-rp -n radius-system
           kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=60s
 
@@ -100,11 +93,13 @@ jobs:
 
       - name: Register Terraform recipes
         run: |
-          # containerImages — pin to this commit
+          # containerImages — pin to this commit, pass registry creds as recipe parameters
           rad recipe register default \
             --resource-type Radius.Compute/containerImages \
             --template-kind terraform \
-            --template-path "git::https://github.com/${{ github.repository }}.git//resource-types/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}"
+            --template-path "git::https://github.com/${{ github.repository }}.git//resource-types/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}" \
+            --parameters ghcr_username="${{ github.actor }}" \
+            --parameters ghcr_token="${{ secrets.GITHUB_TOKEN }}"
 
           # containers — from resource-types-contrib (pinned to submodule commit)
           SUBMODULE_SHA=$(git -C resource-types-contrib rev-parse HEAD)

@@ -25,7 +25,7 @@ Host machine                          kind cluster node
 
 1. Source code lives on the host and is mounted into the kind node via `extraMounts`
 2. The Terraform recipe creates a Kubernetes Job with a `hostPath` volume pointing at the source
-3. BuildKit builds the image and pushes it to ghcr.io using credentials from a `Radius.Security/secrets` resource
+3. BuildKit builds the image and pushes it to ghcr.io using credentials from recipe parameters
 4. The Terraform `kubernetes_job_v1` resource uses `wait_for_completion = true`, so Radius correctly waits for the build to finish before proceeding
 5. Downstream `Radius.Compute/containers` resources reference the built image via a connection
 
@@ -65,9 +65,8 @@ Host machine                          kind cluster node
 > while Bicep recipes return immediately after creating resources without waiting for them to
 > become healthy.
 >
-> Registry credentials are configured once by the platform engineer as environment variables
-> on the `dynamic-rp` deployment (`TF_VAR_ghcr_*`). Developers never need to handle credentials
-> in their Bicep templates.
+> Registry credentials are configured once by the platform engineer as recipe parameters
+> when registering the recipe. Developers never need to handle credentials in their Bicep templates.
 
 ## Quick start
 
@@ -94,18 +93,11 @@ kind create cluster --name radius-demo --config kind-config.yaml
 
 This mounts `demo/app/` into the kind node at `/app/demo`.
 
-### 3. Install Radius and configure registry credentials
+### 3. Install Radius and configure permissions
 
 ```bash
 rad install kubernetes
 kubectl get pods -n radius-system
-
-# Configure GHCR credentials on dynamic-rp (platform engineer one-time setup).
-# These are injected as TF_VAR_* env vars into Terraform recipe execution.
-kubectl set env deployment/dynamic-rp -n radius-system \
-  TF_VAR_ghcr_server=ghcr.io \
-  TF_VAR_ghcr_username=YOUR_GITHUB_USERNAME \
-  TF_VAR_ghcr_token=YOUR_GITHUB_PAT
 
 # Grant dynamic-rp permission to create Kubernetes Jobs
 kubectl patch clusterrole dynamic-rp --type=json -p='[
@@ -119,7 +111,6 @@ kubectl patch clusterrole dynamic-rp --type=json -p='[
     }
   }
 ]'
-
 kubectl rollout restart deployment/dynamic-rp -n radius-system
 kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=60s
 ```
@@ -148,7 +139,16 @@ This runs `make register-types`, `make build`, and `make register-recipes` in se
 - Generates Bicep extension `.tgz` files into `demo/`
 - Registers Terraform recipes for each resource type
 
-> **Note:** Edit the `Makefile` and replace `YOUR_ORG` in the `register-recipes` target with your GitHub username before running `make setup`, or run `make register-types build` and register recipes manually.
+> **Note:** Edit the `Makefile` and replace `YOUR_ORG` in the `register-recipes` target with your GitHub username before running `make setup`. Registry credentials for GHCR are passed as recipe parameters:
+>
+> ```bash
+> rad recipe register default \
+>   --resource-type Radius.Compute/containerImages \
+>   --template-kind terraform \
+>   --template-path "git::https://github.com/YOUR_ORG/radius-containerimagetype-demo.git//resource-types/Compute/containerImages/recipes/kubernetes/terraform" \
+>   --parameters ghcr_username=YOUR_USERNAME \
+>   --parameters ghcr_token=YOUR_PAT
+> ```
 
 ### 6. Deploy
 
@@ -159,10 +159,9 @@ rad deploy app.bicep \
 ```
 
 This will:
-1. Create a `Radius.Security/secrets` resource with GHCR credentials (→ Kubernetes Secret)
-2. Build the container image from `demo/app/` (mounted at `/app/demo`) and push to ghcr.io
-3. Wait for the build Job to complete (Terraform `wait_for_completion`)
-4. Deploy a `Radius.Compute/containers` running the built image
+1. Build the container image from `demo/app/` (mounted at `/app/demo`) and push to ghcr.io
+2. Wait for the build Job to complete (Terraform `wait_for_completion`)
+3. Deploy a `Radius.Compute/containers` running the built image
 
 ### 7. Test
 
