@@ -32,22 +32,19 @@ Host machine                          kind cluster node
 ## Repository structure
 
 ```
-├── resource-types/
-│   └── Compute/containerImages/            # Custom resource type (this project)
-│       ├── containerImages.yaml
-│       ├── README.md
-│       └── recipes/kubernetes/
-│           ├── bicep/
-│           │   └── kubernetes-containerImages.bicep
-│           └── terraform/
-│               ├── main.tf                 # Terraform recipe (recommended)
-│               └── var.tf
-│
-├── resource-types-contrib/                 # Git submodule → radius-project/resource-types-contrib
-│   ├── Compute/containers/                 # Radius.Compute/containers type + recipes
-│   ├── Compute/persistentVolumes/          # Radius.Compute/persistentVolumes type + recipes
-│   ├── Compute/routes/                     # Radius.Compute/routes type + recipes
-│   └── Security/secrets/                   # Radius.Security/secrets type + recipes
+├── resource-types-contrib/                     # Git submodule → radius-project/resource-types-contrib
+│   ├── Compute/containerImages/                # Custom resource type (this project)
+│   │   ├── containerImages.yaml
+│   │   ├── README.md
+│   │   ├── recipes/kubernetes/terraform/
+│   │   │   ├── main.tf                         # Terraform recipe (recommended)
+│   │   │   └── var.tf
+│   │   └── test/
+│   │       └── app.bicep
+│   ├── Compute/containers/                     # Radius.Compute/containers type + recipes
+│   ├── Compute/persistentVolumes/              # Radius.Compute/persistentVolumes type + recipes
+│   ├── Compute/routes/                         # Radius.Compute/routes type + recipes
+│   └── Security/secrets/                       # Radius.Security/secrets type + recipes
 │
 └── demo/
     ├── app/                                # Sample Node.js application
@@ -145,7 +142,7 @@ This runs `make register-types`, `make build`, and `make register-recipes` in se
 > rad recipe register default \
 >   --resource-type Radius.Compute/containerImages \
 >   --template-kind terraform \
->   --template-path "git::https://github.com/YOUR_ORG/radius-containerimagetype-demo.git//resource-types/Compute/containerImages/recipes/kubernetes/terraform" \
+>   --template-path "git::https://github.com/YOUR_ORG/radius-containerimagetype-demo.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform" \
 >   --parameters ghcr_username=YOUR_USERNAME \
 >   --parameters ghcr_token=YOUR_PAT
 > ```

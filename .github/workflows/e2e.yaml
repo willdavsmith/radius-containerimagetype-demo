@@ -97,7 +97,7 @@ jobs:
           rad recipe register default \
             --resource-type Radius.Compute/containerImages \
             --template-kind terraform \
-            --template-path "git::https://github.com/${{ github.repository }}.git//resource-types/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}" \
+            --template-path "git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}" \
             --parameters ghcr_username="${{ github.actor }}" \
             --parameters ghcr_token="${{ secrets.GITHUB_TOKEN }}"
 
