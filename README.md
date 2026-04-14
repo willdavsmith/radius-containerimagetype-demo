@@ -58,12 +58,16 @@ Host machine                          kind cluster node
     └── kind-config.yaml                    # kind cluster with extraMounts
 ```
 
-> **Note:** This repo uses Terraform recipes for `Radius.Compute/containers` and `Radius.Security/secrets`
+> **Note:** This repo uses a Terraform recipe for `Radius.Compute/containers`
 > from [radius-project/resource-types-contrib](https://github.com/radius-project/resource-types-contrib)
 > (included as a git submodule). Terraform recipes are preferred over Bicep because the Terraform
 > Kubernetes provider has built-in health monitoring (`wait_for_rollout`, `wait_for_completion`),
 > while Bicep recipes return immediately after creating resources without waiting for them to
 > become healthy.
+>
+> Registry credentials are configured once by the platform engineer as environment variables
+> on the `dynamic-rp` deployment (`TF_VAR_ghcr_*`). Developers never need to handle credentials
+> in their Bicep templates.
 
 ## Quick start
 
@@ -74,15 +78,11 @@ Host machine                          kind cluster node
 - [Terraform](https://developer.hashicorp.com/terraform/install)
 - A GitHub Personal Access Token with `write:packages` scope
 
-### 1. Clone and configure credentials
+### 1. Clone
 
 ```bash
 git clone --recurse-submodules https://github.com/YOUR_ORG/radius-containerimagetype-demo.git
 cd radius-containerimagetype-demo
-
-cp .env.example .env
-# Edit .env with your GitHub username and PAT
-source .env
 ```
 
 ### 2. Create the kind cluster
@@ -94,11 +94,34 @@ kind create cluster --name radius-demo --config kind-config.yaml
 
 This mounts `demo/app/` into the kind node at `/app/demo`.
 
-### 3. Install Radius
+### 3. Install Radius and configure registry credentials
 
 ```bash
 rad install kubernetes
 kubectl get pods -n radius-system
+
+# Configure GHCR credentials on dynamic-rp (platform engineer one-time setup).
+# These are injected as TF_VAR_* env vars into Terraform recipe execution.
+kubectl set env deployment/dynamic-rp -n radius-system \
+  TF_VAR_ghcr_server=ghcr.io \
+  TF_VAR_ghcr_username=YOUR_GITHUB_USERNAME \
+  TF_VAR_ghcr_token=YOUR_GITHUB_PAT
+
+# Grant dynamic-rp permission to create Kubernetes Jobs
+kubectl patch clusterrole dynamic-rp --type=json -p='[
+  {
+    "op": "add",
+    "path": "/rules/-",
+    "value": {
+      "apiGroups": ["batch"],
+      "resources": ["jobs", "jobs/status"],
+      "verbs": ["create", "delete", "get", "list", "patch", "update", "watch"]
+    }
+  }
+]'
+
+kubectl rollout restart deployment/dynamic-rp -n radius-system
+kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=60s
 ```
 
 ### 4. Create a resource group, environment, and workspace
@@ -129,13 +152,9 @@ This runs `make register-types`, `make build`, and `make register-recipes` in se
 
 ### 6. Deploy
 
-Edit `app.bicep` if needed, then:
-
 ```bash
 cd demo
 rad deploy app.bicep \
-  -p ghcrUsername=$YOUR_GITHUB_USERNAME \
-  -p ghcrPassword=$YOUR_GITHUB_PAT \
   -p image=ghcr.io/your-org/demo:latest
 ```
 

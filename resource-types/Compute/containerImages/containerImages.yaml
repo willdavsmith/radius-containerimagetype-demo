@@ -91,16 +91,20 @@ types:
                 - context
             registry:
               type: object
-              description: (Required) Registry authentication configuration for pushing to a remote registry such as ghcr.io.
+              description: (Optional) Registry authentication overrides. If not specified, the recipe uses credentials configured by the platform engineer via environment variables on the Radius control plane.
               properties:
-                secretName:
+                server:
                   type: string
-                  description: (Required) The name of a Kubernetes Secret of type `kubernetes.io/dockerconfigjson` containing credentials for the target registry.
-              required:
-                - secretName
+                  description: (Optional) The registry server address. If not specified, `ghcr.io` is assumed.
+                username:
+                  type: string
+                  description: (Optional) The registry username.
+                token:
+                  type: string
+                  description: (Optional) The registry token or PAT.
+                  x-radius-sensitive: true
           required:
             - environment
             - application
             - image
             - build
-            - registry

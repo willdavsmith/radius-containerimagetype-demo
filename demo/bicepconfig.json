@@ -5,7 +5,6 @@
 	"extensions": {
 		"radius": "br:biceptypes.azurecr.io/radius:latest",
 		"containerImages": "containerImages-extension.tgz",
-		"containers": "containers-extension.tgz",
-		"secrets": "secrets-extension.tgz"
+		"containers": "containers-extension.tgz"
 	}
 }

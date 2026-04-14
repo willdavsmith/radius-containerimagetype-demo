@@ -33,13 +33,6 @@ jobs:
           REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "name=ghcr.io/${REPO}/demo:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       # ── Cluster setup ────────────────────────────────────────────
 
       - name: Install k3d
@@ -78,6 +71,13 @@ jobs:
               }
             }
           ]'
+
+      - name: Configure registry credentials on dynamic-rp
+        run: |
+          kubectl set env deployment/dynamic-rp -n radius-system \
+            TF_VAR_ghcr_server=ghcr.io \
+            TF_VAR_ghcr_username="${{ github.actor }}" \
+            TF_VAR_ghcr_token="${{ secrets.GITHUB_TOKEN }}"
           kubectl rollout restart deployment/dynamic-rp -n radius-system
           kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=60s
 
@@ -113,12 +113,6 @@ jobs:
             --template-kind terraform \
             --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${SUBMODULE_SHA}"
 
-          # secrets — from resource-types-contrib (pinned to submodule commit)
-          rad recipe register default \
-            --resource-type Radius.Security/secrets \
-            --template-kind terraform \
-            --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform?ref=${SUBMODULE_SHA}"
-
       # ── Deploy ───────────────────────────────────────────────────
 
       - name: Create image pull secret
@@ -140,8 +134,6 @@ jobs:
         working-directory: demo
         run: |
           rad deploy app.bicep \
-            -p ghcrUsername="${{ github.actor }}" \
-            -p ghcrPassword="${{ secrets.GITHUB_TOKEN }}" \
             -p image="${{ steps.image.outputs.name }}"
 
       # ── Verify ───────────────────────────────────────────────────
@@ -171,17 +163,6 @@ jobs:
           echo "Response: $RESPONSE"
           echo "$RESPONSE" | grep -q "Hello"
           echo "✅ App responded correctly"
-
-      - name: Make GHCR package public
-        if: success()
-        continue-on-error: true
-        run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          PKG_NAME=$(echo "${REPO}/demo" | sed 's|/|%2F|g')
-          gh api -X PATCH "/user/packages/container/${PKG_NAME}" \
-            -f visibility=public 2>/dev/null || true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ── Diagnostics & cleanup ────────────────────────────────────
 
