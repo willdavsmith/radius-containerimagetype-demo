@@ -2,7 +2,7 @@ name: E2E Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, docker-provider]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -42,6 +42,7 @@ jobs:
         run: |
           k3d cluster create $CLUSTER_NAME \
             --volume "${{ github.workspace }}/demo/app:/app/demo" \
+            --volume "/var/run/docker.sock:/var/run/docker.sock" \
             --wait
 
       - name: Install Radius CLI
@@ -58,21 +59,32 @@ jobs:
           rad install kubernetes
           kubectl wait --for=condition=available deployment --all -n radius-system --timeout=120s
 
-      - name: Patch dynamic-rp RBAC for batch/jobs
+      - name: Patch dynamic-rp with Docker support
         run: |
-          kubectl patch clusterrole dynamic-rp --type=json -p='[
-            {
-              "op": "add",
-              "path": "/rules/-",
-              "value": {
-                "apiGroups": ["batch"],
-                "resources": ["jobs", "jobs/status"],
-                "verbs": ["create", "delete", "get", "list", "patch", "update", "watch"]
-              }
-            }
+          # Mount Docker socket and install docker-cli via init container
+          # that copies the binary to a shared volume
+          kubectl patch deployment dynamic-rp -n radius-system --type=json -p='[
+            {"op": "add", "path": "/spec/template/spec/volumes/-",
+             "value": {"name": "docker-sock", "hostPath": {"path": "/var/run/docker.sock", "type": "Socket"}}},
+            {"op": "add", "path": "/spec/template/spec/volumes/-",
+             "value": {"name": "docker-bin", "emptyDir": {}}},
+            {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
+             "value": {"name": "docker-sock", "mountPath": "/var/run/docker.sock"}},
+            {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
+             "value": {"name": "docker-bin", "mountPath": "/usr/local/bin/docker", "subPath": "docker"}},
+            {"op": "add", "path": "/spec/template/spec/initContainers/-",
+             "value": {
+               "name": "install-docker-cli",
+               "image": "docker:cli",
+               "command": ["cp", "/usr/local/bin/docker", "/out/docker"],
+               "volumeMounts": [{"name": "docker-bin", "mountPath": "/out"}]
+             }}
           ]'
-          kubectl rollout restart deployment/dynamic-rp -n radius-system
-          kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=60s
+          kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=120s
+
+          # Verify docker is accessible
+          POD=$(kubectl get pods -n radius-system -l app.kubernetes.io/name=dynamic-rp -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec -n radius-system "$POD" -c dynamic-rp -- docker version
 
       # ── Radius setup ─────────────────────────────────────────────
 
@@ -132,14 +144,6 @@ jobs:
             -p image="${{ steps.image.outputs.name }}"
 
       # ── Verify ───────────────────────────────────────────────────
-
-      - name: Verify build job completed
-        run: |
-          NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2)
-          echo "Namespace: $NS"
-          kubectl get jobs -n "$NS"
-          kubectl get jobs -n "$NS" -o jsonpath='{.items[0].status.succeeded}' | grep -q 1
-          echo "✅ Build job completed successfully"
 
       - name: Verify container is running
         run: |
