@@ -61,8 +61,8 @@ jobs:
 
       - name: Patch dynamic-rp with Docker support
         run: |
-          # Mount Docker socket and install docker-cli via init container
-          # that copies the binary to a shared volume
+          # Mount Docker socket, install docker-cli via init container,
+          # and run as root to access the socket
           kubectl patch deployment dynamic-rp -n radius-system --type=json -p='[
             {"op": "add", "path": "/spec/template/spec/volumes/-",
              "value": {"name": "docker-sock", "hostPath": {"path": "/var/run/docker.sock", "type": "Socket"}}},
@@ -72,6 +72,8 @@ jobs:
              "value": {"name": "docker-sock", "mountPath": "/var/run/docker.sock"}},
             {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
              "value": {"name": "docker-bin", "mountPath": "/usr/local/bin/docker", "subPath": "docker"}},
+            {"op": "replace", "path": "/spec/template/spec/containers/0/securityContext",
+             "value": {"allowPrivilegeEscalation": false, "runAsUser": 0}},
             {"op": "add", "path": "/spec/template/spec/initContainers/-",
              "value": {
                "name": "install-docker-cli",
