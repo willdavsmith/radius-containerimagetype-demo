@@ -93,6 +93,10 @@ jobs:
           kubectl exec -n radius-system "$POD" -c dynamic-rp -- docker version
           kubectl exec -n radius-system "$POD" -c dynamic-rp -- ls /app/demo/Dockerfile
 
+          # Log in to GHCR so the Docker provider can push images
+          echo "${{ secrets.GITHUB_TOKEN }}" | kubectl exec -i -n radius-system "$POD" -c dynamic-rp -- \
+            docker login ghcr.io -u token --password-stdin
+
       # ── Radius setup ─────────────────────────────────────────────
 
       - name: Create resource group, environment, and workspace
@@ -112,13 +116,11 @@ jobs:
 
       - name: Register Terraform recipes
         run: |
-          # containerImages — pin to this commit, pass registry creds as recipe parameters
+          # containerImages — pin to this commit
           rad recipe register default \
             --resource-type Radius.Compute/containerImages \
             --template-kind terraform \
-            --template-path "git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}" \
-            --parameters ghcr_username="${{ github.actor }}" \
-            --parameters ghcr_token="${{ secrets.GITHUB_TOKEN }}"
+            --template-path "git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}"
 
           # containers — from resource-types-contrib (pinned to submodule commit)
           SUBMODULE_SHA=$(git -C resource-types-contrib rev-parse HEAD)
