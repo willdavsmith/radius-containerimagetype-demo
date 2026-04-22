@@ -14,6 +14,11 @@ permissions:
 env:
   CLUSTER_NAME: radius-e2e
   IMAGE_TAG: ${{ github.sha }}
+  # Local dynamic-rp image, built from the radius/ submodule and
+  # imported into the k3d cluster so the chart can pull it without
+  # going through a registry.
+  DYNAMIC_RP_REGISTRY: radius-local
+  DYNAMIC_RP_TAG: e2e
 
 jobs:
   e2e:
@@ -26,76 +31,101 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Derive image name
-        id: image
+      - name: Derive registry path
+        id: registry
         run: |
           # GHCR requires lowercase. Use repo name to auto-link package to this repo.
           REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=ghcr.io/${REPO}/demo:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "path=ghcr.io/${REPO}" >> "$GITHUB_OUTPUT"
 
       # ── Cluster setup ────────────────────────────────────────────
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: radius/go.mod
+          cache-dependency-path: radius/go.sum
 
       - name: Install k3d
         run: curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
 
       - name: Create k3d cluster
         run: |
-          k3d cluster create $CLUSTER_NAME \
-            --volume "${{ github.workspace }}/demo/app:/app/demo" \
-            --volume "/var/run/docker.sock:/var/run/docker.sock" \
-            --wait
+          # No host volume mounts. The BuildKit sidecar in dynamic-rp
+          # pulls source from a git URL inside the cluster.
+          k3d cluster create $CLUSTER_NAME --wait
+
+      - name: Build dynamic-rp image from the radius/ submodule
+        working-directory: radius
+        run: |
+          # Builds linux/amd64 image tagged $DYNAMIC_RP_REGISTRY/dynamic-rp:$DYNAMIC_RP_TAG
+          make docker-build-dynamic-rp \
+            DOCKER_REGISTRY=$DYNAMIC_RP_REGISTRY \
+            DOCKER_TAG_VERSION=$DYNAMIC_RP_TAG
+
+      - name: Import dynamic-rp image into k3d
+        run: |
+          k3d image import "$DYNAMIC_RP_REGISTRY/dynamic-rp:$DYNAMIC_RP_TAG" -c $CLUSTER_NAME
 
       - name: Install Radius CLI
+        working-directory: radius
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/radius-project/radius/main/deploy/install.sh" | /bin/bash
+          # Install the rad CLI built from the same submodule revision
+          # so the CLI matches the chart we install below.
+          make build-binaries
+          sudo cp dist/linux_amd64/release/rad /usr/local/bin/rad
+          rad version
 
       - name: Install Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
 
-      - name: Install Radius
+      - name: Stage GHCR credentials Secret manifest
         run: |
-          rad install kubernetes
-          kubectl wait --for=condition=available deployment --all -n radius-system --timeout=120s
+          # The chart will mount this Secret into dynamic-rp at
+          # $HOME/.docker/config.json. The kreuzwerker/docker provider
+          # reads it for registry auth.
+          mkdir -p /tmp/ghcr-creds
+          AUTH=$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64 -w0)
+          cat > /tmp/ghcr-creds/config.json <<EOF
+          {
+            "auths": {
+              "ghcr.io": { "auth": "${AUTH}" }
+            }
+          }
+          EOF
 
-      - name: Patch dynamic-rp with Docker support
+      - name: Install Radius from the worktree chart
+        working-directory: radius
         run: |
-          # Mount Docker socket, source directory, install docker-cli via init container,
-          # and run as root to access the socket
-          kubectl patch deployment dynamic-rp -n radius-system --type=json -p='[
-            {"op": "add", "path": "/spec/template/spec/volumes/-",
-             "value": {"name": "docker-sock", "hostPath": {"path": "/var/run/docker.sock", "type": "Socket"}}},
-            {"op": "add", "path": "/spec/template/spec/volumes/-",
-             "value": {"name": "docker-bin", "emptyDir": {}}},
-            {"op": "add", "path": "/spec/template/spec/volumes/-",
-             "value": {"name": "app-source", "hostPath": {"path": "/app/demo", "type": "Directory"}}},
-            {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
-             "value": {"name": "docker-sock", "mountPath": "/var/run/docker.sock"}},
-            {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
-             "value": {"name": "docker-bin", "mountPath": "/usr/local/bin/docker", "subPath": "docker"}},
-            {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
-             "value": {"name": "app-source", "mountPath": "/app/demo", "readOnly": true}},
-            {"op": "replace", "path": "/spec/template/spec/containers/0/securityContext",
-             "value": {"allowPrivilegeEscalation": false, "runAsUser": 0}},
-            {"op": "add", "path": "/spec/template/spec/initContainers/-",
-             "value": {
-               "name": "install-docker-cli",
-               "image": "docker:cli",
-               "command": ["cp", "/usr/local/bin/docker", "/out/docker"],
-               "volumeMounts": [{"name": "docker-bin", "mountPath": "/out"}]
-             }}
-          ]'
-          kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=120s
+          # The radius-system namespace must exist before we create
+          # the Secret. Let `rad install` create it, then add the
+          # Secret, then re-run install with the credentials wired in.
+          # (rad install with --reinstall is idempotent.)
+          kubectl create namespace radius-system --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic ghcr-credentials \
+            --namespace radius-system \
+            --from-file=config.json=/tmp/ghcr-creds/config.json
 
-          # Verify docker and source are accessible
+          # psaMode=baseline because GitHub Actions' k3d node likely
+          # does not have the UserNamespacesSupport feature gate
+          # enabled. (restricted mode requires user namespaces.)
+          rad install kubernetes \
+            --reinstall \
+            --chart deploy/Chart \
+            --set rp.image=$DYNAMIC_RP_REGISTRY/dynamic-rp \
+            --set rp.tag=$DYNAMIC_RP_TAG \
+            --set dynamicrp.image=$DYNAMIC_RP_REGISTRY/dynamic-rp \
+            --set dynamicrp.tag=$DYNAMIC_RP_TAG \
+            --set dynamicrp.buildkit.psaMode=baseline \
+            --set dynamicrp.buildkit.credentialsSecret=ghcr-credentials
+
+          kubectl wait --for=condition=available deployment --all -n radius-system --timeout=180s
+
+          # Confirm the buildkitd sidecar came up.
           POD=$(kubectl get pods -n radius-system -l app.kubernetes.io/name=dynamic-rp -o jsonpath='{.items[0].metadata.name}')
-          kubectl exec -n radius-system "$POD" -c dynamic-rp -- docker version
-          kubectl exec -n radius-system "$POD" -c dynamic-rp -- ls /app/demo/Dockerfile
-
-          # Log in to GHCR so the Docker provider can push images
-          echo "${{ secrets.GITHUB_TOKEN }}" | kubectl exec -i -n radius-system "$POD" -c dynamic-rp -- \
-            docker login ghcr.io -u token --password-stdin
+          kubectl exec -n radius-system "$POD" -c buildkitd -- buildctl debug workers
 
       # ── Radius setup ─────────────────────────────────────────────
 
@@ -116,11 +146,14 @@ jobs:
 
       - name: Register Terraform recipes
         run: |
-          # containerImages — pin to this commit
+          # containerImages — pin to this commit. The recipe receives
+          # `registry` as a parameter; it composes the full image ref
+          # as <registry>/<resource-name>:<tag>.
           rad recipe register default \
             --resource-type Radius.Compute/containerImages \
             --template-kind terraform \
-            --template-path "git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}"
+            --template-path "git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}" \
+            --parameters registry="${{ steps.registry.outputs.path }}"
 
           # containers — from resource-types-contrib (pinned to submodule commit)
           SUBMODULE_SHA=$(git -C resource-types-contrib rev-parse HEAD)
@@ -149,8 +182,11 @@ jobs:
       - name: Deploy application
         working-directory: demo
         run: |
+          # Recipe builds from this commit's tree on GitHub via BuildKit's
+          # native git fetch. No host mount, no docker socket.
           rad deploy app.bicep \
-            -p image="${{ steps.image.outputs.name }}"
+            -p imageTag="${IMAGE_TAG}" \
+            -p buildContext="git::https://github.com/${{ github.repository }}.git//demo/app?ref=${IMAGE_TAG}"
 
       # ── Verify ───────────────────────────────────────────────────
 
@@ -180,8 +216,11 @@ jobs:
           echo "=== Pods ==="
           kubectl get pods --all-namespaces
           echo ""
-          echo "=== Jobs ==="
-          kubectl get jobs --all-namespaces
+          echo "=== dynamic-rp logs (recipe runner) ==="
+          kubectl logs -n radius-system -l app.kubernetes.io/name=dynamic-rp -c dynamic-rp --tail=200 2>/dev/null || true
+          echo ""
+          echo "=== buildkitd sidecar logs ==="
+          kubectl logs -n radius-system -l app.kubernetes.io/name=dynamic-rp -c buildkitd --tail=200 2>/dev/null || true
           echo ""
           NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2 || echo "unknown")
           if [ "$NS" != "unknown" ]; then

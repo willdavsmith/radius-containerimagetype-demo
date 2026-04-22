@@ -5,8 +5,11 @@ extension containers
 @description('The ID of your Radius Environment. Set automatically by the rad CLI.')
 param environment string
 
-@description('The full container image reference to build and push. Must be lowercase.')
-param image string
+@description('Tag for the produced image. Required because the build context is a remote git URL.')
+param imageTag string
+
+@description('Git URL the recipe clones inside the cluster to build from.')
+param buildContext string
 
 resource app 'Applications.Core/applications@2023-10-01-preview' = {
   name: 'demo'
@@ -15,17 +18,18 @@ resource app 'Applications.Core/applications@2023-10-01-preview' = {
   }
 }
 
-// Build and push the container image from local source to ghcr.io.
-// Registry credentials are configured by the platform engineer via
-// TF_VAR_ghcr_* environment variables on the dynamic-rp deployment.
+// Build and push the container image. The recipe (registered with a
+// `registry` parameter pointing at this repo's GHCR) clones from
+// `buildContext` inside the cluster on its rootless BuildKit sidecar
+// and pushes to `<registry>/<this-resource-name>:<imageTag>`.
 resource demoImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   name: 'demo-image'
   properties: {
     environment: environment
     application: app.id
-    image: image
+    tag: imageTag
     build: {
-      context: '/app/demo'
+      context: buildContext
     }
   }
 }
