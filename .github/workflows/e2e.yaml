@@ -15,7 +15,7 @@ env:
   CLUSTER_NAME: radius-e2e
   IMAGE_TAG: ${{ github.sha }}
   # Local dynamic-rp image, built from the radius/ submodule and
-  # imported into the k3d cluster so the chart can pull it without
+  # loaded into the kind cluster so the chart can pull it without
   # going through a registry.
   DYNAMIC_RP_REGISTRY: radius-local
   DYNAMIC_RP_TAG: e2e
@@ -46,14 +46,44 @@ jobs:
           go-version-file: radius/go.mod
           cache-dependency-path: radius/go.sum
 
-      - name: Install k3d
-        run: curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
 
-      - name: Create k3d cluster
+      - name: Create kind cluster
         run: |
-          # No host volume mounts. The BuildKit sidecar in dynamic-rp
-          # pulls source from a git URL inside the cluster.
-          k3d cluster create $CLUSTER_NAME --wait
+          # kind supports the UserNamespacesSupport feature gate, which
+          # lets us run BuildKit rootless in PSA `restricted` mode
+          # (the design's primary target). k3d/k3s does not currently
+          # surface this feature gate (see k3d-io/k3d#1178 and #1439).
+          cat > /tmp/kind-config.yaml <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          name: radius-e2e
+          featureGates:
+            UserNamespacesSupport: true
+          nodes:
+            - role: control-plane
+              kubeadmConfigPatches:
+                - |
+                  kind: ClusterConfiguration
+                  apiServer:
+                    extraArgs:
+                      feature-gates: "UserNamespacesSupport=true"
+                  controllerManager:
+                    extraArgs:
+                      feature-gates: "UserNamespacesSupport=true"
+                  scheduler:
+                    extraArgs:
+                      feature-gates: "UserNamespacesSupport=true"
+                - |
+                  kind: InitConfiguration
+                  nodeRegistration:
+                    kubeletExtraArgs:
+                      feature-gates: "UserNamespacesSupport=true"
+          EOF
+          kind create cluster --name $CLUSTER_NAME --config /tmp/kind-config.yaml --wait 120s
 
       - name: Build dynamic-rp image from the radius/ submodule
         working-directory: radius
@@ -63,9 +93,9 @@ jobs:
             DOCKER_REGISTRY=$DYNAMIC_RP_REGISTRY \
             DOCKER_TAG_VERSION=$DYNAMIC_RP_TAG
 
-      - name: Import dynamic-rp image into k3d
+      - name: Import dynamic-rp image into kind
         run: |
-          k3d image import "$DYNAMIC_RP_REGISTRY/dynamic-rp:$DYNAMIC_RP_TAG" -c $CLUSTER_NAME
+          kind load docker-image "$DYNAMIC_RP_REGISTRY/dynamic-rp:$DYNAMIC_RP_TAG" --name $CLUSTER_NAME
 
       - name: Install Radius CLI
         working-directory: radius
@@ -108,17 +138,15 @@ jobs:
             --namespace radius-system \
             --from-file=config.json=/tmp/ghcr-creds/config.json
 
-          # psaMode=baseline because GitHub Actions' k3d node likely
-          # does not have the UserNamespacesSupport feature gate
-          # enabled. (restricted mode requires user namespaces.)
+          # psaMode=restricted runs BuildKit rootless via Linux user
+          # namespaces (kind cluster has the UserNamespacesSupport
+          # feature gate enabled above).
           rad install kubernetes \
             --reinstall \
             --chart deploy/Chart \
-            --set rp.image=$DYNAMIC_RP_REGISTRY/dynamic-rp \
-            --set rp.tag=$DYNAMIC_RP_TAG \
             --set dynamicrp.image=$DYNAMIC_RP_REGISTRY/dynamic-rp \
             --set dynamicrp.tag=$DYNAMIC_RP_TAG \
-            --set dynamicrp.buildkit.psaMode=baseline \
+            --set dynamicrp.buildkit.psaMode=restricted \
             --set dynamicrp.buildkit.credentialsSecret=ghcr-credentials
 
           kubectl wait --for=condition=available deployment --all -n radius-system --timeout=180s
@@ -238,4 +266,4 @@ jobs:
         if: always()
         run: |
           rad application delete demo 2>/dev/null || true
-          k3d cluster delete $CLUSTER_NAME 2>/dev/null || true
+          kind delete cluster --name $CLUSTER_NAME 2>/dev/null || true
