@@ -244,6 +244,12 @@ jobs:
           echo "=== Pods ==="
           kubectl get pods --all-namespaces
           echo ""
+          echo "=== radius-system pod descriptions ==="
+          kubectl describe pods -n radius-system 2>/dev/null || true
+          echo ""
+          echo "=== terraform-init logs ==="
+          kubectl logs -n radius-system -l app.kubernetes.io/name=dynamic-rp -c terraform-init --tail=200 2>/dev/null || true
+          echo ""
           echo "=== dynamic-rp logs (recipe runner) ==="
           kubectl logs -n radius-system -l app.kubernetes.io/name=dynamic-rp -c dynamic-rp --tail=200 2>/dev/null || true
           echo ""
