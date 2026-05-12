@@ -97,6 +97,15 @@ jobs:
         run: |
           kind load docker-image "$DYNAMIC_RP_REGISTRY/dynamic-rp:$DYNAMIC_RP_TAG" --name $CLUSTER_NAME
 
+      - name: Preload alpine image into kind (avoid Docker Hub rate limits)
+        run: |
+          # The dynamic-rp Pod's terraform-init init container pulls
+          # alpine:3.23 from Docker Hub, which is subject to anonymous
+          # rate limits in CI (HTTP 429). Pull once on the runner and
+          # side-load into the node so kubelet never hits docker.io.
+          docker pull alpine:3.23
+          kind load docker-image alpine:3.23 --name $CLUSTER_NAME
+
       - name: Install Radius CLI
         working-directory: radius
         run: |
