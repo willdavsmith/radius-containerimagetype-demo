@@ -173,7 +173,11 @@ jobs:
         run: make register-types
 
       - name: Build Bicep extensions
-        run: make build
+        run: |
+          # `make build` invokes `rad bicep publish-extension`, which
+          # shells out to ~/.rad/bin/bicep. Ensure it's installed.
+          rad bicep download
+          make build
 
       - name: Register Terraform recipes
         run: |
