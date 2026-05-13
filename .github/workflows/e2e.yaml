@@ -165,7 +165,7 @@ jobs:
 
           # Confirm the buildkitd sidecar came up.
           POD=$(kubectl get pods -n radius-system -l app.kubernetes.io/name=dynamic-rp -o jsonpath='{.items[0].metadata.name}')
-          kubectl exec -n radius-system "$POD" -c buildkitd -- buildctl --addr unix:///run/buildkit/buildkit.sock debug workers
+          kubectl exec -n radius-system "$POD" -c buildkitd -- buildctl --addr tcp://127.0.0.1:1234 debug workers
 
       # ── Radius setup ─────────────────────────────────────────────
 
