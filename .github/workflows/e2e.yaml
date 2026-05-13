@@ -154,21 +154,18 @@ jobs:
           # the design's target for production clusters; the chart
           # itself is exercised here in baseline mode.
           #
-          # Pin Terraform to 1.14.x: starting with 1.15, `terraform
-          # get` validates module inputs, but Radius adds the
-          # `context` parameter to the wrapper main.tf.json *after*
-          # downloading the module — so any recipe whose `context`
-          # variable lacks a default would fail to download under
-          # 1.15.x. The chart defaults to "latest" which currently
-          # resolves to 1.15.3.
+          # Note: as of radius main, `pkg/recipes/terraform/version.go`
+          # pins the runtime download to a 1.14.x build, so the
+          # previous `--set global.terraform.downloadUrl=...` workaround
+          # for the TF 1.15 `terraform get` regression is no longer
+          # required.
           rad install kubernetes \
             --reinstall \
             --chart deploy/Chart \
             --set dynamicrp.image=$DYNAMIC_RP_REGISTRY/dynamic-rp \
             --set dynamicrp.tag=$DYNAMIC_RP_TAG \
             --set dynamicrp.buildkit.psaMode=baseline \
-            --set dynamicrp.buildkit.credentialsSecret=ghcr-credentials \
-            --set global.terraform.downloadUrl=https://releases.hashicorp.com/terraform/1.14.3/terraform_1.14.3_linux_amd64.zip
+            --set dynamicrp.buildkit.credentialsSecret=ghcr-credentials
 
           kubectl wait --for=condition=available deployment --all -n radius-system --timeout=180s
 
