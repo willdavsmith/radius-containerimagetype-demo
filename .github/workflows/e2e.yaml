@@ -148,9 +148,16 @@ jobs:
           POD=$(kubectl get pods -n radius-system -l app.kubernetes.io/name=dynamic-rp -o jsonpath='{.items[0].metadata.name}')
           kubectl exec -n radius-system "$POD" -c buildkitd -- buildctl --addr tcp://127.0.0.1:1234 debug workers
 
-      # ── Radius setup ─────────────────────────────────────────────
+      # ══════════════════════════════════════════════════════════════
+      # PLATFORM ENGINEER — one-time environment setup
+      #
+      # The PE owns: cluster, Radius install, registry credentials,
+      # resource type registration, and recipe registration. Developers
+      # never touch any of these. Step names are prefixed `[PE]` to
+      # make the persona boundary visible in the Actions UI.
+      # ══════════════════════════════════════════════════════════════
 
-      - name: Create resource group, environment, and workspace
+      - name: '[PE] Create resource group, environment, and workspace'
         run: |
           rad group create default
           rad environment create default --group default
@@ -159,26 +166,44 @@ jobs:
             --environment default \
             --group default
 
-      - name: Register resource types
+      - name: '[PE] Provision registry credentials'
+        run: |
+          # Single dockerconfigjson Secret owned by the PE in
+          # radius-system. The containerImages recipe is registered
+          # below with --parameters registrySecretName=ghcr-creds, and
+          # the recipe itself materializes a per-resource pull Secret
+          # in each application namespace (so kubelet can pull) — no
+          # developer ever sees these credentials. Use dry-run|apply
+          # so the step is idempotent across repeated CI runs.
+          kubectl create secret docker-registry ghcr-creds \
+            --namespace radius-system \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="${{ secrets.GITHUB_TOKEN }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: '[PE] Register resource types'
         run: make register-types
 
-      - name: Build Bicep extensions
+      - name: '[PE] Build Bicep extensions'
         run: |
           # `make build` invokes `rad bicep publish-extension`, which
           # shells out to ~/.rad/bin/bicep. Ensure it's installed.
           rad bicep download
           make build
 
-      - name: Register Terraform recipes
+      - name: '[PE] Register Terraform recipes'
         run: |
-          # containerImages — pin to this commit. The recipe receives
-          # `registry` as a parameter; it composes the full image ref
-          # as <registry>/<resource-name>:<tag>.
+          # containerImages — pin to this commit. Two PE-owned recipe
+          # parameters: `registry` (where to push) and
+          # `registrySecretName` (which radius-system Secret holds the
+          # creds). Developers never see either.
           rad recipe register default \
             --resource-type Radius.Compute/containerImages \
             --template-kind terraform \
             --template-path "git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}" \
-            --parameters registry="${{ steps.registry.outputs.path }}"
+            --parameters registry="${{ steps.registry.outputs.path }}" \
+            --parameters registrySecretName="ghcr-creds"
 
           # containers — from resource-types-contrib (pinned to submodule commit)
           SUBMODULE_SHA=$(git -C resource-types-contrib rev-parse HEAD)
@@ -187,41 +212,36 @@ jobs:
             --template-kind terraform \
             --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${SUBMODULE_SHA}"
 
-          # secrets — needed because the containerImages resource references a
-          # Radius.Security/secrets resource that holds the registry credentials.
+          # secrets — registered for completeness (developer might use
+          # it for non-registry secrets); not required by the
+          # containerImages flow under the PE-owned model.
           rad recipe register default \
             --resource-type Radius.Security/secrets \
             --template-kind terraform \
             --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform?ref=${SUBMODULE_SHA}"
 
-      # ── Deploy ───────────────────────────────────────────────────
+      # ══════════════════════════════════════════════════════════════
+      # DEVELOPER — every deploy
+      #
+      # Inputs are only what the developer naturally knows: where the
+      # source lives and what tag to publish. NO registry credentials,
+      # NO Secret names, NO extension declarations for `secrets`.
+      # ══════════════════════════════════════════════════════════════
 
-      - name: Deploy application
+      - name: '[Developer] Deploy application'
         working-directory: demo
         run: |
-          # Recipe builds from this commit's tree on GitHub via BuildKit's
-          # native git fetch. No host mount, no docker socket. Registry
-          # credentials are passed as parameters and realized as a single
-          # Radius.Security/secrets resource (kind: dockerconfigjson) that
-          # is referenced by both the containerImages recipe (build push)
-          # and the containers recipe (kubelet imagePullSecrets) — so
-          # nothing has to be created out-of-band.
           rad deploy app.bicep \
             -p imageTag="${IMAGE_TAG}" \
-            -p buildContext="git::https://github.com/${{ github.repository }}.git//demo/app?ref=${IMAGE_TAG}" \
-            -p registryServer="ghcr.io" \
-            -p registryUsername="${{ github.actor }}" \
-            -p registryPassword="${{ secrets.GITHUB_TOKEN }}"
+            -p buildContext="git::https://github.com/${{ github.repository }}.git//demo/app?ref=${IMAGE_TAG}"
 
-      # ── Verify ───────────────────────────────────────────────────
-
-      - name: Verify container is running
+      - name: '[Developer] Verify container is running'
         run: |
           NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2)
           kubectl wait --for=condition=available deployment/demo -n "$NS" --timeout=120s
           echo "✅ Container deployment is available"
 
-      - name: Verify app responds
+      - name: '[Developer] Verify app responds'
         run: |
           NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2)
           kubectl port-forward -n "$NS" deployment/demo 3000:3000 &

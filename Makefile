@@ -37,7 +37,9 @@ register-recipes: ## Register Terraform recipes with the default environment
 	rad recipe register default \
 		--resource-type Radius.Compute/containerImages \
 		--template-kind terraform \
-		--template-path "git::https://github.com/YOUR_ORG/radius-containerimagetype-demo.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform"
+		--template-path "git::https://github.com/YOUR_ORG/radius-containerimagetype-demo.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform" \
+		--parameters registry="ghcr.io/YOUR_ORG" \
+		--parameters registrySecretName="ghcr-creds"
 	rad recipe register default \
 		--resource-type Radius.Compute/containers \
 		--template-kind terraform \
