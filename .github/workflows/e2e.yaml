@@ -196,32 +196,20 @@ jobs:
 
       # ── Deploy ───────────────────────────────────────────────────
 
-      - name: Create image pull secret
-        run: |
-          # The containers recipe deploys to a namespace named "<group>-<app>".
-          # Create the namespace and attach a pull secret to the default service
-          # account so Deployments can pull from GHCR (new packages are private).
-          kubectl create namespace default-demo || true
-          kubectl create secret docker-registry ghcr-pull \
-            --namespace default-demo \
-            --docker-server=ghcr.io \
-            --docker-username="${{ github.actor }}" \
-            --docker-password="${{ secrets.GITHUB_TOKEN }}" \
-            || true
-          kubectl patch serviceaccount default -n default-demo \
-            -p '{"imagePullSecrets": [{"name": "ghcr-pull"}]}' || true
-
       - name: Deploy application
         working-directory: demo
         run: |
           # Recipe builds from this commit's tree on GitHub via BuildKit's
           # native git fetch. No host mount, no docker socket. Registry
-          # credentials are passed as parameters and realized as a
-          # Radius.Security/secrets resource that the recipe reads at
-          # build time.
+          # credentials are passed as parameters and realized as a single
+          # Radius.Security/secrets resource (kind: dockerconfigjson) that
+          # is referenced by both the containerImages recipe (build push)
+          # and the containers recipe (kubelet imagePullSecrets) — so
+          # nothing has to be created out-of-band.
           rad deploy app.bicep \
             -p imageTag="${IMAGE_TAG}" \
             -p buildContext="git::https://github.com/${{ github.repository }}.git//demo/app?ref=${IMAGE_TAG}" \
+            -p registryServer="ghcr.io" \
             -p registryUsername="${{ github.actor }}" \
             -p registryPassword="${{ secrets.GITHUB_TOKEN }}"
 

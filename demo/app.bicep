@@ -19,6 +19,9 @@ param registryUsername string
 @secure()
 param registryPassword string
 
+@description('Registry server hostname (e.g. ghcr.io). Used to key the Docker config.json auth entry.')
+param registryServer string = 'ghcr.io'
+
 resource app 'Applications.Core/applications@2023-10-01-preview' = {
   name: 'demo'
   properties: {
@@ -26,20 +29,26 @@ resource app 'Applications.Core/applications@2023-10-01-preview' = {
   }
 }
 
-// Registry credentials. Realized by Radius as a Kubernetes Secret in
-// the application's namespace; the containerImages recipe reads
-// `USERNAME` and `PASSWORD` from it to authenticate to the registry.
+// Registry credentials. Realized by Radius as a Kubernetes Secret of
+// type `kubernetes.io/dockerconfigjson` in the application's namespace.
+// The same Secret is used by the containerImages recipe to authenticate
+// the build push, and by kubelet (via `imagePullSecrets` on the
+// containers resource below) to pull the resulting image.
 resource registryCreds 'Radius.Security/secrets@2025-08-01-preview' = {
   name: 'registry-creds'
   properties: {
     environment: environment
     application: app.id
+    kind: 'dockerconfigjson'
     data: {
-      USERNAME: {
+      username: {
         value: registryUsername
       }
-      PASSWORD: {
+      password: {
         value: registryPassword
+      }
+      server: {
+        value: registryServer
       }
     }
   }
@@ -68,6 +77,7 @@ resource demo 'Radius.Compute/containers@2025-08-01-preview' = {
   properties: {
     environment: environment
     application: app.id
+    imagePullSecrets: [registryCreds.name]
     containers: {
       demo: {
         image: demoImage.properties.image
