@@ -120,33 +120,9 @@ jobs:
         with:
           terraform_wrapper: false
 
-      - name: Stage GHCR credentials Secret manifest
-        run: |
-          # The chart will mount this Secret into dynamic-rp at
-          # $HOME/.docker/config.json. The kreuzwerker/docker provider
-          # reads it for registry auth.
-          mkdir -p /tmp/ghcr-creds
-          AUTH=$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64 -w0)
-          cat > /tmp/ghcr-creds/config.json <<EOF
-          {
-            "auths": {
-              "ghcr.io": { "auth": "${AUTH}" }
-            }
-          }
-          EOF
-
       - name: Install Radius from the worktree chart
         working-directory: radius
         run: |
-          # The radius-system namespace must exist before we create
-          # the Secret. Let `rad install` create it, then add the
-          # Secret, then re-run install with the credentials wired in.
-          # (rad install with --reinstall is idempotent.)
-          kubectl create namespace radius-system --dry-run=client -o yaml | kubectl apply -f -
-          kubectl create secret generic ghcr-credentials \
-            --namespace radius-system \
-            --from-file=config.json=/tmp/ghcr-creds/config.json
-
           # psaMode=baseline in CI: PSA restricted requires kernel +
           # runc + containerd support for sysfs mounts inside user
           # namespaces, which the default kindest/node image does not
@@ -164,8 +140,7 @@ jobs:
             --chart deploy/Chart \
             --set dynamicrp.image=$DYNAMIC_RP_REGISTRY/dynamic-rp \
             --set dynamicrp.tag=$DYNAMIC_RP_TAG \
-            --set dynamicrp.buildkit.psaMode=baseline \
-            --set dynamicrp.buildkit.credentialsSecret=ghcr-credentials
+            --set dynamicrp.buildkit.psaMode=baseline
 
           kubectl wait --for=condition=available deployment --all -n radius-system --timeout=180s
 
@@ -212,6 +187,13 @@ jobs:
             --template-kind terraform \
             --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${SUBMODULE_SHA}"
 
+          # secrets — needed because the containerImages resource references a
+          # Radius.Security/secrets resource that holds the registry credentials.
+          rad recipe register default \
+            --resource-type Radius.Security/secrets \
+            --template-kind terraform \
+            --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform?ref=${SUBMODULE_SHA}"
+
       # ── Deploy ───────────────────────────────────────────────────
 
       - name: Create image pull secret
@@ -233,10 +215,15 @@ jobs:
         working-directory: demo
         run: |
           # Recipe builds from this commit's tree on GitHub via BuildKit's
-          # native git fetch. No host mount, no docker socket.
+          # native git fetch. No host mount, no docker socket. Registry
+          # credentials are passed as parameters and realized as a
+          # Radius.Security/secrets resource that the recipe reads at
+          # build time.
           rad deploy app.bicep \
             -p imageTag="${IMAGE_TAG}" \
-            -p buildContext="git::https://github.com/${{ github.repository }}.git//demo/app?ref=${IMAGE_TAG}"
+            -p buildContext="git::https://github.com/${{ github.repository }}.git//demo/app?ref=${IMAGE_TAG}" \
+            -p registryUsername="${{ github.actor }}" \
+            -p registryPassword="${{ secrets.GITHUB_TOKEN }}"
 
       # ── Verify ───────────────────────────────────────────────────
 

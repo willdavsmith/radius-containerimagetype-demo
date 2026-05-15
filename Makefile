@@ -4,7 +4,7 @@ DEMO_DIR := demo
 RTC_DIR := resource-types-contrib
 
 # All resource type folders from the submodule (including containerImages)
-RTC_TYPES := Compute/containerImages Compute/containers Compute/persistentVolumes Compute/routes
+RTC_TYPES := Compute/containerImages Compute/containers Compute/persistentVolumes Compute/routes Security/secrets
 
 .PHONY: help build register-types register-recipes setup clean
 
@@ -42,6 +42,10 @@ register-recipes: ## Register Terraform recipes with the default environment
 		--resource-type Radius.Compute/containers \
 		--template-kind terraform \
 		--template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform"
+	rad recipe register default \
+		--resource-type Radius.Security/secrets \
+		--template-kind terraform \
+		--template-path "git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform"
 	@echo "✅ Recipes registered"
 
 setup: register-types build register-recipes ## Run all setup steps (register types, build extensions, register recipes)
