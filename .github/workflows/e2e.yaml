@@ -53,37 +53,7 @@ jobs:
 
       - name: Create kind cluster
         run: |
-          # kind supports the UserNamespacesSupport feature gate, which
-          # lets us run BuildKit rootless in PSA `restricted` mode
-          # (the design's primary target). k3d/k3s does not currently
-          # surface this feature gate (see k3d-io/k3d#1178 and #1439).
-          cat > /tmp/kind-config.yaml <<'EOF'
-          kind: Cluster
-          apiVersion: kind.x-k8s.io/v1alpha4
-          name: radius-e2e
-          featureGates:
-            UserNamespacesSupport: true
-          nodes:
-            - role: control-plane
-              kubeadmConfigPatches:
-                - |
-                  kind: ClusterConfiguration
-                  apiServer:
-                    extraArgs:
-                      feature-gates: "UserNamespacesSupport=true"
-                  controllerManager:
-                    extraArgs:
-                      feature-gates: "UserNamespacesSupport=true"
-                  scheduler:
-                    extraArgs:
-                      feature-gates: "UserNamespacesSupport=true"
-                - |
-                  kind: InitConfiguration
-                  nodeRegistration:
-                    kubeletExtraArgs:
-                      feature-gates: "UserNamespacesSupport=true"
-          EOF
-          kind create cluster --name $CLUSTER_NAME --config /tmp/kind-config.yaml --wait 120s
+          kind create cluster --name $CLUSTER_NAME --wait 120s
 
       - name: Build dynamic-rp image from the radius/ submodule
         working-directory: radius
@@ -123,13 +93,6 @@ jobs:
       - name: Install Radius from the worktree chart
         working-directory: radius
         run: |
-          # psaMode=baseline in CI: PSA restricted requires kernel +
-          # runc + containerd support for sysfs mounts inside user
-          # namespaces, which the default kindest/node image does not
-          # reliably provide on ubuntu-latest. Restricted mode remains
-          # the design's target for production clusters; the chart
-          # itself is exercised here in baseline mode.
-          #
           # Note: as of radius main, `pkg/recipes/terraform/version.go`
           # pins the runtime download to a 1.14.x build, so the
           # previous `--set global.terraform.downloadUrl=...` workaround
@@ -139,8 +102,7 @@ jobs:
             --reinstall \
             --chart deploy/Chart \
             --set dynamicrp.image=$DYNAMIC_RP_REGISTRY/dynamic-rp \
-            --set dynamicrp.tag=$DYNAMIC_RP_TAG \
-            --set dynamicrp.buildkit.psaMode=baseline
+            --set dynamicrp.tag=$DYNAMIC_RP_TAG
 
           kubectl wait --for=condition=available deployment --all -n radius-system --timeout=180s
 

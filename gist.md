@@ -17,13 +17,18 @@ reference registry credentials in any form.
 ### 1. Install Radius (with the BuildKit sidecar enabled)
 
 The `dynamic-rp` chart ships a rootless `buildkitd` sidecar that the
-recipe talks to via `BUILDKIT_HOST`.
+recipe talks to via `BUILDKIT_HOST`. The default install works on every
+supported Kubernetes version — managed clusters, kind, k3d, Docker
+Desktop, etc. — without extra flags:
 
 ```bash
 rad install kubernetes
-# Production clusters: leave psaMode at the default (`restricted`).
-# Local kind on ubuntu-latest: --set dynamicrp.buildkit.psaMode=baseline
 ```
+
+> Operators who enforce PSA `restricted` cluster-wide and run Kubernetes
+> ≥ 1.30 with the `UserNamespacesSupport` feature gate can opt into
+> the stricter sidecar profile with
+> `--set dynamicrp.buildkit.psaMode=restricted`.
 
 ### 2. Create a group, environment, and workspace
 
