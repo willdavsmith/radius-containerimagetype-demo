@@ -137,8 +137,12 @@ jobs:
           rad group create default
           rad workspace create kubernetes default \
             --context "$(kubectl config current-context)" \
-            --environment default \
             --group default
+          # Create a bare environment so the workspace can bind to it.
+          # platform.bicep below replaces it with the full recipeConfig.
+          rad env create default --group default
+          rad workspace switch default
+          rad env switch default
 
       - name: '[PE] Register resource types'
         run: make register-types
