@@ -54,6 +54,7 @@ param envNamespace string = 'default'
 resource registryCreds 'Applications.Core/secretStores@2023-10-01-preview' = {
   name: 'registry-creds'
   properties: {
+    resource: 'radius-system/registry-creds'
     type: 'generic'
     data: {
       username: {
