@@ -1,13 +1,14 @@
 # `Radius.Compute/containerImages` — UX
 
-Two personas: PE provisions a registry secret and registers the recipe
-once; developer writes Bicep and runs `rad deploy`. Developer never
-references registry credentials and never declares a secret.
+Two personas: PE provisions a registry secret and registers recipes
+once via Bicep; developer writes Bicep and runs `rad deploy`. Developer
+never references registry credentials and never declares a secret.
 
 No upstream `Radius.Core/*` changes. No driver changes. Everything is
-expressed with existing types: `Radius.Security/secrets`,
-`Radius.Core/applications`, `Radius.Core/environments`,
-`Radius.Compute/containerImages`, `Radius.Compute/containers`.
+expressed with existing types: `Radius.Core/recipePacks`,
+`Radius.Core/environments`, `Radius.Core/applications`,
+`Radius.Security/secrets`, `Radius.Compute/containerImages`,
+`Radius.Compute/containers`.
 
 ## PE — one-time
 
@@ -17,64 +18,93 @@ rad install kubernetes
 rad group create default
 rad workspace create kubernetes default \
   --context "$(kubectl config current-context)" --group default
-rad env create default --group default
-rad workspace switch default && rad env switch default
+rad workspace switch default
+rad env create default --preview --group default
+rad env switch default --preview
 
 # 2. Register resource types.
 rad resource-type create -f Security/secrets/secrets.yaml
 rad resource-type create -f Compute/containerImages/containerImages.yaml
 rad resource-type create -f Compute/containers/containers.yaml
 
-# 3. Register the Radius.Security/secrets recipe (needed for step 4).
+# 3. Register the Radius.Security/secrets recipe imperatively so
+#    platform.bicep below can deploy the ghcr-creds secret.
 rad recipe register default \
   --resource-type Radius.Security/secrets \
   --template-kind terraform \
   --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform"
 
-# 4. Provision a "platform" app containing the registry secret.
-#    The recipe materializes a K8s Secret in the env's namespace
-#    (default here).
-rad deploy registry-secret.bicep \
+# 4. Deploy platform.bicep — declares the recipePack (which registers
+#    the containerImages + containers recipes), the env, the platform
+#    app, and the ghcr-creds secret in one shot.
+rad deploy platform.bicep \
   -p registryUsername="$GHCR_USER" \
-  -p registryPassword="$GHCR_TOKEN"
-
-# 5. Register the containerImages recipe, telling it where to find
-#    the K8s Secret.
-rad recipe register default \
-  --resource-type Radius.Compute/containerImages \
-  --template-kind terraform \
-  --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containerImages/recipes/kubernetes/terraform" \
-  --parameters registry="ghcr.io/my-org" \
-  --parameters registrySecretName="ghcr-creds" \
-  --parameters registrySecretNamespace="default"
-
-rad recipe register default \
-  --resource-type Radius.Compute/containers \
-  --template-kind terraform \
-  --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform"
+  -p registryPassword="$GHCR_TOKEN" \
+  -p registryPath="ghcr.io/my-org" \
+  -p containerImagesTemplatePath="git::https://github.com/radius-project/resource-types-contrib.git//Compute/containerImages/recipes/kubernetes/terraform" \
+  -p containersTemplatePath="git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform"
 ```
 
-`registry-secret.bicep`:
+`platform.bicep`:
 
 ```bicep
 extension radius
 
-param environment string
+param registryPath string
 param registryUsername string
 @secure()
 param registryPassword string
+param containerImagesTemplatePath string
+param containersTemplatePath string
+param envNamespace string = 'default'
+
+resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  name: 'default-recipes'
+  location: 'global'
+  properties: {
+    recipes: {
+      'Radius.Security/secrets': {
+        recipeKind: 'terraform'
+        recipeLocation: 'git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform'
+      }
+      'Radius.Compute/containerImages': {
+        recipeKind: 'terraform'
+        recipeLocation: containerImagesTemplatePath
+        parameters: {
+          registry: registryPath
+          registrySecretName: 'ghcr-creds'
+          registrySecretNamespace: envNamespace
+        }
+      }
+      'Radius.Compute/containers': {
+        recipeKind: 'terraform'
+        recipeLocation: containersTemplatePath
+      }
+    }
+  }
+}
+
+resource env 'Radius.Core/environments@2025-08-01-preview' = {
+  name: 'default'
+  location: 'global'
+  properties: {
+    providers: { kubernetes: { namespace: envNamespace } }
+    recipePacks: [ recipes.id ]
+  }
+}
 
 resource platform 'Radius.Core/applications@2025-08-01-preview' = {
   name: 'platform'
-  properties: { environment: environment }
+  location: 'global'
+  properties: { environment: env.id }
 }
 
 resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
   name: 'ghcr-creds'
   properties: {
-    environment: environment
+    environment: env.id
     application: platform.id
-    type: 'generic'
+    kind: 'generic'
     data: {
       username: { value: registryUsername }
       password: { value: registryPassword }
@@ -92,7 +122,9 @@ resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
 ```bicep
 extension radius
 extension containerImages
-extension containers
+// Disambiguate from the radius extension's Radius.Compute/containers
+// (which lacks imagePullSecrets).
+extension containers as ctnrs
 
 param environment string
 param imageTag string
@@ -113,7 +145,7 @@ resource demoImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   }
 }
 
-resource demo 'Radius.Compute/containers@2025-08-01-preview' = {
+resource demo 'ctnrs:Radius.Compute/containers@2025-08-01-preview' = {
   name: 'demo'
   properties: {
     environment: environment
@@ -140,15 +172,16 @@ rad deploy app.bicep \
 
 1. PE-provided `registrySecretName` + `registrySecretNamespace` reach
    the recipe as Terraform variables at execution time.
-2. Recipe's `kubernetes_secret` data source reads
-   `<namespace>/<name>` and surfaces `username` + `password`.
+2. Recipe's `kubernetes_secret` data source reads `<ns>/<name>` and
+   base64-decodes `username` + `password` (the data-source returns
+   base64, unlike the resource form).
 3. Recipe renders a Docker `config.json` to its working dir, exports
    `DOCKER_CONFIG`, and runs
    `buildctl build ... --output type=image,name=ghcr.io/my-org/demo-image:<tag>,push=true`
    against the in-cluster BuildKit sidecar.
 4. Recipe creates a `kubernetes.io/dockerconfigjson` Secret named
-   `<resource>-pull` (here `demo-image-pull`) in the app namespace and
-   surfaces its name as `imagePullSecretName`.
+   `<resource>-pull` in the developer's app namespace and surfaces its
+   name as `imagePullSecretName`.
 5. `containers` recipe creates a Deployment whose pod spec references
    `imagePullSecrets: [demo-image-pull]`.
 
