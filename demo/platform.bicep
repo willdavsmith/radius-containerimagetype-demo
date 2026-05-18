@@ -35,10 +35,10 @@ param containersTemplatePath string
 @description('Kubernetes namespace the environment provisions resources into by default.')
 param envNamespace string = 'default'
 
-// Default Radius namespace convention: <env>-<app>. This is the
-// namespace the Radius.Security/secrets recipe materializes the
-// `ghcr-creds` Kubernetes Secret into.
-var registrySecretNamespace = '${envNamespace}-platform'
+// Radius.Core/environments uses providers.kubernetes.namespace
+// directly as the app namespace (no <env>-<app> derivation), so the
+// platform secret lands in the same namespace as the env.
+var registrySecretNamespace = envNamespace
 
 resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: 'default-recipes'
