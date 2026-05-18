@@ -128,12 +128,14 @@ jobs:
           # Applications.Core/environments). platform.bicep below
           # upserts this same resource to point at our recipe pack.
           rad env create default --preview --group default
+          # Don't bind --environment on workspace create: that lookup
+          # only knows about Applications.Core/environments. The
+          # Radius.Core env is selected via `rad env switch --preview`.
           rad workspace create kubernetes default \
             --context "$(kubectl config current-context)" \
-            --environment default \
             --group default
           rad workspace switch default
-          rad env switch default
+          rad env switch default --preview
 
       - name: '[PE] Register resource types'
         run: make register-types
