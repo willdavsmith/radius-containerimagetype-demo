@@ -1,102 +1,104 @@
-# `Radius.Compute/containerImages` — End-to-End UX
+# `Radius.Compute/containerImages` — UX
 
-This demo introduces a new resource type, `Radius.Compute/containerImages`,
-that lets Radius build and push a container image as part of a normal
-`rad deploy`. The image is then consumed by a `Radius.Compute/containers`
-resource in the same deployment.
+Two personas: PE configures the environment once; developer writes Bicep
+and runs `rad deploy`. Developer never references registry credentials.
 
-The work is split across two personas. The **platform engineer** sets up
-the environment once, including registry credentials. The **developer**
-writes Bicep and runs `rad deploy` — they never see, configure, or
-reference registry credentials in any form.
-
----
-
-## Platform engineer — one-time setup
-
-### 1. Install Radius (with the BuildKit sidecar enabled)
-
-The `dynamic-rp` chart ships a rootless `buildkitd` sidecar that the
-recipe talks to via `BUILDKIT_HOST`. The default install works on every
-supported Kubernetes version — managed clusters, kind, k3d, Docker
-Desktop, etc. — without extra flags:
+## PE — one-time
 
 ```bash
+# 1. Install
 rad install kubernetes
-```
 
-> Operators who enforce PSA `restricted` cluster-wide and run Kubernetes
-> ≥ 1.30 with the `UserNamespacesSupport` feature gate can opt into
-> the stricter sidecar profile with
-> `--set dynamicrp.buildkit.psaMode=restricted`.
-
-### 2. Create a group, environment, and workspace
-
-```bash
+# 2. Group + workspace (env is declared in platform.bicep below)
 rad group create default
-rad environment create default --group default
 rad workspace create kubernetes default \
   --context "$(kubectl config current-context)" \
-  --environment default \
-  --group default
-```
+  --environment default --group default
 
-### 3. Provision registry credentials (PE-owned)
-
-A single `kubernetes.io/dockerconfigjson` Secret in `radius-system`,
-created with normal Kubernetes tooling. The recipe (registered below)
-reads from this Secret and copies the credential into each application
-namespace as a per-resource pull Secret. Developers never see it.
-
-```bash
-kubectl create secret docker-registry ghcr-creds \
-  --namespace radius-system \
-  --docker-server=ghcr.io \
-  --docker-username="$GHCR_USER" \
-  --docker-password="$GHCR_TOKEN"
-```
-
-### 4. Register the resource types
-
-```bash
+# 3. Resource types
 rad resource-type create -f Compute/containerImages/containerImages.yaml
 rad resource-type create -f Compute/containers/containers.yaml
+
+# 4. Provision environment, registry credentials, and recipes
+rad deploy platform.bicep \
+  -p registryUsername="$GHCR_USER" \
+  -p registryPassword="$GHCR_TOKEN" \
+  -p registryHost="ghcr.io" \
+  -p registryPath="ghcr.io/my-org" \
+  -p containerImagesTemplatePath="git::https://github.com/radius-project/resource-types-contrib.git//Compute/containerImages/recipes/kubernetes/terraform" \
+  -p containersTemplatePath="git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform"
 ```
 
-### 5. Register the recipes
+`platform.bicep`:
 
-The `containerImages` recipe takes two PE-owned parameters: where to
-push (`registry`) and which Secret holds the push credentials
-(`registrySecretName`).
+```bicep
+extension radius
 
-```bash
-rad recipe register default \
-  --resource-type Radius.Compute/containerImages \
-  --template-kind terraform \
-  --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containerImages/recipes/kubernetes/terraform" \
-  --parameters registry="ghcr.io/my-org" \
-  --parameters registrySecretName="ghcr-creds"
+param registryUsername string
+@secure()
+param registryPassword string
+param registryHost string = 'ghcr.io'
+param registryPath string
+param containerImagesTemplatePath string
+param containersTemplatePath string
 
-rad recipe register default \
-  --resource-type Radius.Compute/containers \
-  --template-kind terraform \
-  --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform"
+resource registryCreds 'Applications.Core/secretStores@2023-10-01-preview' = {
+  name: 'registry-creds'
+  properties: {
+    type: 'generic'
+    data: {
+      username: { value: registryUsername }
+      password: { value: registryPassword }
+    }
+  }
+}
+
+resource env 'Applications.Core/environments@2023-10-01-preview' = {
+  name: 'default'
+  properties: {
+    compute: { kind: 'kubernetes', resourceId: 'self', namespace: 'default' }
+    recipeConfig: {
+      terraform: {
+        authentication: {
+          registries: {
+            '${registryHost}': { secret: registryCreds.id }
+          }
+        }
+      }
+    }
+    recipes: {
+      'Radius.Compute/containerImages': {
+        default: {
+          templateKind: 'terraform'
+          templatePath: containerImagesTemplatePath
+          parameters: { registry: registryPath }
+        }
+      }
+      'Radius.Compute/containers': {
+        default: {
+          templateKind: 'terraform'
+          templatePath: containersTemplatePath
+        }
+      }
+    }
+  }
+}
 ```
 
-That's it. The PE has now configured **where images go**, **how the
-build authenticates**, and **how kubelet pulls** — all in one place,
-without exposing credentials to developer Bicep or `rad deploy`
-parameters.
+The SecretStore holds the raw `username` + `password`. The Radius
+terraform driver resolves it at recipe execution time, renders a Docker
+`config.json` into the recipe's working directory, and exports
+`DOCKER_CONFIG` for buildctl. For `Radius.Compute/containerImages`
+recipes specifically the driver also materializes a
+`kubernetes.io/dockerconfigjson` Secret in the application namespace
+(so kubelet can pull the image) and injects its name into the recipe
+output as `imagePullSecretName`.
 
----
+> Operators enforcing PSA `restricted` cluster-wide on K8s ≥ 1.30
+> with `UserNamespacesSupport` may opt into the stricter sidecar
+> profile via `--set dynamicrp.buildkit.psaMode=restricted`.
 
-## Developer — every deployment
-
-### 1. Write the Bicep
-
-A complete app (build + run) is two resources. **Notice what's
-absent**: no `Radius.Security/secrets`, no `extension secrets`, no
-`registryUsername`, no `registryPassword`, no registry hostname.
+## Developer — every deploy
 
 ```bicep
 extension radius
@@ -105,14 +107,13 @@ extension containers
 
 param environment string
 param imageTag string
-param buildContext string             // git URL or local path
+param buildContext string
 
 resource app 'Applications.Core/applications@2023-10-01-preview' = {
   name: 'demo'
   properties: { environment: environment }
 }
 
-// Build & push. The recipe uses the PE-provided registry credentials.
 resource demoImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   name: 'demo-image'
   properties: {
@@ -123,10 +124,6 @@ resource demoImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   }
 }
 
-// Run the image. `imagePullSecretName` is a read-only output of the
-// containerImages resource — the recipe materializes a pull Secret
-// in this namespace and surfaces its name here so the developer never
-// has to know what's in it.
 resource demo 'Radius.Compute/containers@2025-08-01-preview' = {
   name: 'demo'
   properties: {
@@ -139,14 +136,10 @@ resource demo 'Radius.Compute/containers@2025-08-01-preview' = {
         ports: { web: { containerPort: 3000 } }
       }
     }
-    connections: {
-      demoContainerImage: { source: demoImage.id }
-    }
+    connections: { demoContainerImage: { source: demoImage.id } }
   }
 }
 ```
-
-### 2. Deploy
 
 ```bash
 rad deploy app.bicep \
@@ -154,39 +147,27 @@ rad deploy app.bicep \
   -p buildContext="git::https://github.com/my-org/my-app.git//.?ref=$(git rev-parse HEAD)"
 ```
 
-What happens, in order:
+## Flow
 
-1. The `containerImages` recipe reads the PE-owned `ghcr-creds` Secret
-   from `radius-system`, writes a Docker `config.json` to disk, and
-   runs `buildctl build ... --output type=image,name=ghcr.io/my-org/demo-image:<sha>,push=true`
+1. Terraform driver resolves the `registry-creds` SecretStore listed
+   under `recipeConfig.terraform.authentication.registries["ghcr.io"]`,
+   writes a Docker `config.json` to the recipe working dir, and exports
+   `DOCKER_CONFIG`.
+2. `containerImages` recipe runs
+   `buildctl build ... --output type=image,name=ghcr.io/my-org/demo-image:<tag>,push=true`
    against the in-cluster BuildKit sidecar.
-2. The same recipe creates a `kubernetes.io/dockerconfigjson` Secret
-   in the application namespace named `demo-image-pull` containing
-   the same credentials.
-3. The recipe returns `properties.image` (the fully-qualified ref) and
-   `properties.imagePullSecretName` (`"demo-image-pull"`).
-4. The `containers` recipe creates a Deployment whose pod spec
-   references `imagePullSecrets: [demo-image-pull]`, so kubelet uses
-   that Secret to pull the image that was just pushed.
+3. Driver creates `<resource>-pull` (here `demo-image-pull`) in the app
+   namespace with the same credentials and injects
+   `imagePullSecretName` into the recipe output.
+4. `containers` recipe creates a Deployment whose pod spec references
+   `imagePullSecrets: [demo-image-pull]`.
 
-### 3. Iterate
+## Developer never
 
-Edit code → `rad deploy` again. The recipe content-hashes the build
-context for local sources (so unchanged code is a no-op rebuild), or
-respects `tag` for git contexts.
-
----
-
-## What the developer does **not** have to do
-
-- ❌ Run `docker build` / `docker push` locally
-- ❌ Install or configure a Docker daemon
-- ❌ Run `kubectl create secret docker-registry`
-- ❌ Patch the default ServiceAccount with `imagePullSecrets`
-- ❌ Hard-code a registry hostname in their Bicep
-- ❌ Pass registry credentials as `rad deploy` parameters
-- ❌ Declare a `Radius.Security/secrets` resource for registry creds
-- ❌ Manage credentials at the application level
-
-The only inputs are **source location and a tag** — everything else
-flows from the platform engineer's one-time setup.
+- Runs `docker build` / `docker push`
+- Installs a Docker daemon
+- Runs `kubectl create secret docker-registry`
+- Patches a ServiceAccount with `imagePullSecrets`
+- Hard-codes a registry hostname
+- Passes registry credentials as `rad deploy` params
+- Declares a SecretStore for registry creds
