@@ -1,5 +1,6 @@
 extension radius
 extension containerImages
+extension containers as ctnrs
 
 @description('The ID of your Radius Environment. Set automatically by the rad CLI.')
 param environment string
@@ -33,7 +34,7 @@ resource demoImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   }
 }
 
-resource demo 'Radius.Compute/containers@2025-08-01-preview' = {
+resource demo 'ctnrs:Radius.Compute/containers@2025-08-01-preview' = {
   name: 'demo'
   properties: {
     environment: environment
