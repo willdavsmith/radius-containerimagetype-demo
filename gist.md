@@ -32,8 +32,8 @@ rad recipe register default \
   --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform"
 
 # 4. Provision a "platform" app containing the registry secret.
-#    The recipe materializes a K8s Secret in the platform app's
-#    namespace (default-platform here).
+#    The recipe materializes a K8s Secret in the env's namespace
+#    (default here).
 rad deploy registry-secret.bicep \
   -p registryUsername="$GHCR_USER" \
   -p registryPassword="$GHCR_TOKEN"
@@ -46,7 +46,7 @@ rad recipe register default \
   --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containerImages/recipes/kubernetes/terraform" \
   --parameters registry="ghcr.io/my-org" \
   --parameters registrySecretName="ghcr-creds" \
-  --parameters registrySecretNamespace="default-platform"
+  --parameters registrySecretNamespace="default"
 
 rad recipe register default \
   --resource-type Radius.Compute/containers \
