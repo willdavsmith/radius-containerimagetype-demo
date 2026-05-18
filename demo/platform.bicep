@@ -42,30 +42,25 @@ var registrySecretNamespace = '${envNamespace}-platform'
 
 resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: 'default-recipes'
+  location: 'global'
   properties: {
     recipes: {
       'Radius.Security/secrets': {
-        default: {
-          recipeKind: 'terraform'
-          recipeLocation: 'git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform'
-        }
+        recipeKind: 'terraform'
+        recipeLocation: 'git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform'
       }
       'Radius.Compute/containerImages': {
-        default: {
-          recipeKind: 'terraform'
-          recipeLocation: containerImagesTemplatePath
-          parameters: {
-            registry: registryPath
-            registrySecretName: 'ghcr-creds'
-            registrySecretNamespace: registrySecretNamespace
-          }
+        recipeKind: 'terraform'
+        recipeLocation: containerImagesTemplatePath
+        parameters: {
+          registry: registryPath
+          registrySecretName: 'ghcr-creds'
+          registrySecretNamespace: registrySecretNamespace
         }
       }
       'Radius.Compute/containers': {
-        default: {
-          recipeKind: 'terraform'
-          recipeLocation: containersTemplatePath
-        }
+        recipeKind: 'terraform'
+        recipeLocation: containersTemplatePath
       }
     }
   }
@@ -73,6 +68,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
 
 resource env 'Radius.Core/environments@2025-08-01-preview' = {
   name: 'default'
+  location: 'global'
   properties: {
     providers: {
       kubernetes: {
@@ -87,6 +83,7 @@ resource env 'Radius.Core/environments@2025-08-01-preview' = {
 
 resource platform 'Radius.Core/applications@2025-08-01-preview' = {
   name: 'platform'
+  location: 'global'
   properties: {
     environment: env.id
   }
@@ -97,7 +94,7 @@ resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: platform.id
-    type: 'generic'
+    kind: 'generic'
     data: {
       username: {
         value: registryUsername
