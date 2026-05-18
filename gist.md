@@ -1,50 +1,79 @@
 # `Radius.Compute/containerImages` — UX
 
-Two personas: PE configures the environment once; developer writes Bicep
-and runs `rad deploy`. Developer never references registry credentials.
+Two personas: PE provisions a registry secret and registers the recipe
+once; developer writes Bicep and runs `rad deploy`. Developer never
+references registry credentials and never declares a secret.
+
+No upstream `Radius.Core/*` changes. No driver changes. Everything is
+expressed with existing types: `Radius.Security/secrets`,
+`Radius.Core/applications`, `Radius.Core/environments`,
+`Radius.Compute/containerImages`, `Radius.Compute/containers`.
 
 ## PE — one-time
 
 ```bash
-# 1. Install
+# 1. Install Radius + create group/workspace/env.
 rad install kubernetes
-
-# 2. Group + workspace (env is declared in platform.bicep below)
 rad group create default
 rad workspace create kubernetes default \
-  --context "$(kubectl config current-context)" \
-  --environment default --group default
+  --context "$(kubectl config current-context)" --group default
+rad env create default --group default
+rad workspace switch default && rad env switch default
 
-# 3. Resource types
+# 2. Register resource types.
+rad resource-type create -f Security/secrets/secrets.yaml
 rad resource-type create -f Compute/containerImages/containerImages.yaml
 rad resource-type create -f Compute/containers/containers.yaml
 
-# 4. Provision environment, registry credentials, and recipes
-rad deploy platform.bicep \
+# 3. Register the Radius.Security/secrets recipe (needed for step 4).
+rad recipe register default \
+  --resource-type Radius.Security/secrets \
+  --template-kind terraform \
+  --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform"
+
+# 4. Provision a "platform" app containing the registry secret.
+#    The recipe materializes a K8s Secret in the platform app's
+#    namespace (default-platform here).
+rad deploy registry-secret.bicep \
   -p registryUsername="$GHCR_USER" \
-  -p registryPassword="$GHCR_TOKEN" \
-  -p registryHost="ghcr.io" \
-  -p registryPath="ghcr.io/my-org" \
-  -p containerImagesTemplatePath="git::https://github.com/radius-project/resource-types-contrib.git//Compute/containerImages/recipes/kubernetes/terraform" \
-  -p containersTemplatePath="git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform"
+  -p registryPassword="$GHCR_TOKEN"
+
+# 5. Register the containerImages recipe, telling it where to find
+#    the K8s Secret.
+rad recipe register default \
+  --resource-type Radius.Compute/containerImages \
+  --template-kind terraform \
+  --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containerImages/recipes/kubernetes/terraform" \
+  --parameters registry="ghcr.io/my-org" \
+  --parameters registrySecretName="ghcr-creds" \
+  --parameters registrySecretNamespace="default-platform"
+
+rad recipe register default \
+  --resource-type Radius.Compute/containers \
+  --template-kind terraform \
+  --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform"
 ```
 
-`platform.bicep`:
+`registry-secret.bicep`:
 
 ```bicep
 extension radius
 
+param environment string
 param registryUsername string
 @secure()
 param registryPassword string
-param registryHost string = 'ghcr.io'
-param registryPath string
-param containerImagesTemplatePath string
-param containersTemplatePath string
 
-resource registryCreds 'Applications.Core/secretStores@2023-10-01-preview' = {
-  name: 'registry-creds'
+resource platform 'Radius.Core/applications@2025-08-01-preview' = {
+  name: 'platform'
+  properties: { environment: environment }
+}
+
+resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
+  name: 'ghcr-creds'
   properties: {
+    environment: environment
+    application: platform.id
     type: 'generic'
     data: {
       username: { value: registryUsername }
@@ -52,47 +81,7 @@ resource registryCreds 'Applications.Core/secretStores@2023-10-01-preview' = {
     }
   }
 }
-
-resource env 'Applications.Core/environments@2023-10-01-preview' = {
-  name: 'default'
-  properties: {
-    compute: { kind: 'kubernetes', resourceId: 'self', namespace: 'default' }
-    recipeConfig: {
-      terraform: {
-        authentication: {
-          registries: {
-            '${registryHost}': { secret: registryCreds.id }
-          }
-        }
-      }
-    }
-    recipes: {
-      'Radius.Compute/containerImages': {
-        default: {
-          templateKind: 'terraform'
-          templatePath: containerImagesTemplatePath
-          parameters: { registry: registryPath }
-        }
-      }
-      'Radius.Compute/containers': {
-        default: {
-          templateKind: 'terraform'
-          templatePath: containersTemplatePath
-        }
-      }
-    }
-  }
-}
 ```
-
-The SecretStore holds the raw `username` + `password`. The Radius
-terraform driver resolves it at recipe execution time, renders a Docker
-`config.json` into the recipe's working directory, and exports
-`DOCKER_CONFIG` for buildctl. For `Radius.Compute/containerImages`
-recipes specifically the driver also materializes a
-`kubernetes.io/dockerconfigjson` Secret in the application namespace
-(so kubelet can pull the image) and injects its name into the recipe
-output as `imagePullSecretName`.
 
 > Operators enforcing PSA `restricted` cluster-wide on K8s ≥ 1.30
 > with `UserNamespacesSupport` may opt into the stricter sidecar
@@ -109,7 +98,7 @@ param environment string
 param imageTag string
 param buildContext string
 
-resource app 'Applications.Core/applications@2023-10-01-preview' = {
+resource app 'Radius.Core/applications@2025-08-01-preview' = {
   name: 'demo'
   properties: { environment: environment }
 }
@@ -149,17 +138,18 @@ rad deploy app.bicep \
 
 ## Flow
 
-1. Terraform driver resolves the `registry-creds` SecretStore listed
-   under `recipeConfig.terraform.authentication.registries["ghcr.io"]`,
-   writes a Docker `config.json` to the recipe working dir, and exports
-   `DOCKER_CONFIG`.
-2. `containerImages` recipe runs
+1. PE-provided `registrySecretName` + `registrySecretNamespace` reach
+   the recipe as Terraform variables at execution time.
+2. Recipe's `kubernetes_secret` data source reads
+   `<namespace>/<name>` and surfaces `username` + `password`.
+3. Recipe renders a Docker `config.json` to its working dir, exports
+   `DOCKER_CONFIG`, and runs
    `buildctl build ... --output type=image,name=ghcr.io/my-org/demo-image:<tag>,push=true`
    against the in-cluster BuildKit sidecar.
-3. Driver creates `<resource>-pull` (here `demo-image-pull`) in the app
-   namespace with the same credentials and injects
-   `imagePullSecretName` into the recipe output.
-4. `containers` recipe creates a Deployment whose pod spec references
+4. Recipe creates a `kubernetes.io/dockerconfigjson` Secret named
+   `<resource>-pull` (here `demo-image-pull`) in the app namespace and
+   surfaces its name as `imagePullSecretName`.
+5. `containers` recipe creates a Deployment whose pod spec references
    `imagePullSecrets: [demo-image-pull]`.
 
 ## Developer never
@@ -170,4 +160,4 @@ rad deploy app.bicep \
 - Patches a ServiceAccount with `imagePullSecrets`
 - Hard-codes a registry hostname
 - Passes registry credentials as `rad deploy` params
-- Declares a SecretStore for registry creds
+- Declares a secret of any kind

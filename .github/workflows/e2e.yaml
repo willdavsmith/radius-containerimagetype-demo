@@ -55,23 +55,19 @@ jobs:
         run: |
           kind create cluster --name $CLUSTER_NAME --wait 120s
 
-      - name: Build dynamic-rp + applications-rp images from the radius/ submodule
+      - name: Build dynamic-rp image from the radius/ submodule
         working-directory: radius
         run: |
-          # Both images are built from the same submodule revision and
-          # pinned to the same tag. dynamic-rp carries the terraform
-          # recipe driver changes (DOCKER_CONFIG injection + per-app
-          # pull Secret materialization); applications-rp carries the
-          # env API surface for the new
-          # `recipeConfig.terraform.authentication.registries` field.
-          make docker-build-dynamic-rp docker-build-applications-rp \
+          # dynamic-rp carries the BuildKit sidecar that the containerImages
+          # recipe shells out to. No applications-rp build needed: we don't
+          # touch the env API surface anymore.
+          make docker-build-dynamic-rp \
             DOCKER_REGISTRY=$DYNAMIC_RP_REGISTRY \
             DOCKER_TAG_VERSION=$DYNAMIC_RP_TAG
 
       - name: Import images into kind
         run: |
           kind load docker-image "$DYNAMIC_RP_REGISTRY/dynamic-rp:$DYNAMIC_RP_TAG" --name $CLUSTER_NAME
-          kind load docker-image "$DYNAMIC_RP_REGISTRY/applications-rp:$DYNAMIC_RP_TAG" --name $CLUSTER_NAME
 
       - name: Preload alpine image into kind (avoid Docker Hub rate limits)
         run: |
@@ -108,9 +104,7 @@ jobs:
             --reinstall \
             --chart deploy/Chart \
             --set dynamicrp.image=$DYNAMIC_RP_REGISTRY/dynamic-rp \
-            --set dynamicrp.tag=$DYNAMIC_RP_TAG \
-            --set rp.image=$DYNAMIC_RP_REGISTRY/applications-rp \
-            --set rp.tag=$DYNAMIC_RP_TAG
+            --set dynamicrp.tag=$DYNAMIC_RP_TAG
 
           kubectl wait --for=condition=available deployment --all -n radius-system --timeout=180s
 
@@ -127,20 +121,17 @@ jobs:
       # make the persona boundary visible in the Actions UI.
       # ══════════════════════════════════════════════════════════════
 
-      - name: '[PE] Create resource group and workspace'
+      - name: '[PE] Create resource group, env, and workspace'
         run: |
-          # The environment itself is declared in platform.bicep below
-          # so the PE can baseline its compute config, registry
-          # credentials, and recipe registrations in one declarative
-          # artifact. We still need a group + workspace for the rad
-          # CLI to target.
           rad group create default
+          # --preview creates a Radius.Core/environments (vs the legacy
+          # Applications.Core/environments). platform.bicep below
+          # upserts this same resource to point at our recipe pack.
+          rad env create default --preview --group default
           rad workspace create kubernetes default \
             --context "$(kubectl config current-context)" \
+            --environment default \
             --group default
-          # Create a bare environment so the workspace can bind to it.
-          # platform.bicep below replaces it with the full recipeConfig.
-          rad env create default --group default
           rad workspace switch default
           rad env switch default
 
@@ -149,35 +140,36 @@ jobs:
 
       - name: '[PE] Build Bicep extensions'
         run: |
-          # `make build` invokes `rad bicep publish-extension`, which
-          # shells out to ~/.rad/bin/bicep. Ensure it's installed.
           rad bicep download
           make build
 
-      - name: '[PE] Provision environment, registry credentials, and recipes'
+      - name: '[PE] Provision recipe pack, registry credentials, and platform app'
         working-directory: demo
         env:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Declarative platform baseline. `platform.bicep` declares:
-          #   * an Applications.Core/secretStores (generic) holding the
-          #     registry username + password,
-          #   * the Applications.Core/environments with
-          #     recipeConfig.terraform.authentication.registries
-          #     referencing that SecretStore, plus the
-          #     Radius.Compute/containerImages + Radius.Compute/containers
-          #     recipe registrations pinned to this commit.
+          # platform.bicep declares (and upserts onto the env created
+          # above):
+          #   * Radius.Core/recipePacks 'default-recipes' with the
+          #     Security/secrets, Compute/containerImages (parameters
+          #     wire registrySecretName + registrySecretNamespace into
+          #     the recipe), and Compute/containers recipes.
+          #   * Radius.Core/environments 'default' referencing the pack.
+          #   * Radius.Core/applications 'platform'.
+          #   * Radius.Security/secrets 'ghcr-creds' in the platform app
+          #     -> K8s Secret in <env>-platform namespace.
           #
-          # The Radius terraform driver renders DOCKER_CONFIG for
-          # buildctl and materializes a per-resource pull Secret in the
-          # app namespace at recipe execution time. Developers never
-          # see any of this.
+          # The containerImages recipe reads the K8s Secret via
+          # `kubernetes_secret`, renders Docker config.json for
+          # buildctl ($DOCKER_CONFIG), pushes the image, and
+          # materializes a per-resource pull Secret in the developer
+          # app's namespace, surfacing the name via
+          # `imagePullSecretName`.
           SUBMODULE_SHA=$(git -C ../resource-types-contrib rev-parse HEAD)
           rad deploy platform.bicep \
             -p registryUsername="${GHCR_USERNAME}" \
             -p registryPassword="${GHCR_TOKEN}" \
-            -p registryHost="ghcr.io" \
             -p registryPath="${{ steps.registry.outputs.path }}" \
             -p containerImagesTemplatePath="git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}" \
             -p containersTemplatePath="git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${SUBMODULE_SHA}"

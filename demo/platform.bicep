@@ -1,60 +1,102 @@
-// Platform-engineer-owned infrastructure. Declares:
+// Platform-engineer baseline. Declares everything the developer's
+// `app.bicep` depends on: a Radius environment, a recipe pack with
+// inline parameters wiring registry credentials into the
+// containerImages recipe, a `platform` application that hosts the
+// registry secret, and the Radius.Security/secrets resource that
+// materializes the underlying Kubernetes Secret kubelet and buildctl
+// will consume.
 //
-//   1. An `Applications.Core/secretStores` of `type: 'generic'`
-//      holding the registry username + password (PAT) the
-//      Radius.Compute/containerImages recipe pushes images with.
-//
-//   2. An `Applications.Core/environments` that references that
-//      SecretStore from
-//      `recipeConfig.terraform.authentication.registries[<host>]`
-//      and registers the Terraform recipes the developer's
-//      `app.bicep` consumes.
-//
-// The Radius terraform driver resolves the referenced SecretStore at
-// recipe execution time, materializes a Docker config.json into the
-// recipe's working directory, exports `DOCKER_CONFIG` for buildctl,
-// and (for Radius.Compute/containerImages specifically) also
-// materializes a `kubernetes.io/dockerconfigjson` Secret in the app
-// namespace so kubelet can pull the image, surfacing its name as the
-// recipe output `imagePullSecretName`. Developers never see the
-// credentials, the SecretStore, or the pull Secret.
-//
+// Deploy:
 //   rad deploy platform.bicep \
 //     -p registryUsername=$GHCR_USER \
 //     -p registryPassword=$GHCR_TOKEN \
-//     -p registryHost=ghcr.io \
 //     -p registryPath=ghcr.io/myorg \
 //     -p containerImagesTemplatePath='git::https://…?ref=<sha>' \
 //     -p containersTemplatePath='git::https://…?ref=<sha>'
 
 extension radius
 
-@description('Registry host (key under recipeConfig.terraform.authentication.registries). E.g. ghcr.io.')
-param registryHost string = 'ghcr.io'
-
-@description('Default registry path the recipe pushes images to. E.g. ghcr.io/myorg/myrepo.')
+@description('Registry path the containerImages recipe pushes images to. E.g. ghcr.io/myorg.')
 param registryPath string
 
-@description('Username for authenticating to the registry.')
+@description('Registry username.')
 param registryUsername string
 
-@description('Password (or PAT) for authenticating to the registry.')
+@description('Registry password / PAT.')
 @secure()
 param registryPassword string
 
-@description('Terraform template path (git::https…?ref=…) for the Radius.Compute/containerImages recipe.')
+@description('Terraform template path for the Radius.Compute/containerImages recipe.')
 param containerImagesTemplatePath string
 
-@description('Terraform template path (git::https…?ref=…) for the Radius.Compute/containers recipe.')
+@description('Terraform template path for the Radius.Compute/containers recipe.')
 param containersTemplatePath string
 
 @description('Kubernetes namespace the environment provisions resources into by default.')
 param envNamespace string = 'default'
 
-resource registryCreds 'Applications.Core/secretStores@2023-10-01-preview' = {
-  name: 'registry-creds'
+// Default Radius namespace convention: <env>-<app>. This is the
+// namespace the Radius.Security/secrets recipe materializes the
+// `ghcr-creds` Kubernetes Secret into.
+var registrySecretNamespace = '${envNamespace}-platform'
+
+resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  name: 'default-recipes'
   properties: {
-    resource: 'radius-system/registry-creds'
+    recipes: {
+      'Radius.Security/secrets': {
+        default: {
+          recipeKind: 'terraform'
+          recipeLocation: 'git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform'
+        }
+      }
+      'Radius.Compute/containerImages': {
+        default: {
+          recipeKind: 'terraform'
+          recipeLocation: containerImagesTemplatePath
+          parameters: {
+            registry: registryPath
+            registrySecretName: 'ghcr-creds'
+            registrySecretNamespace: registrySecretNamespace
+          }
+        }
+      }
+      'Radius.Compute/containers': {
+        default: {
+          recipeKind: 'terraform'
+          recipeLocation: containersTemplatePath
+        }
+      }
+    }
+  }
+}
+
+resource env 'Radius.Core/environments@2025-08-01-preview' = {
+  name: 'default'
+  properties: {
+    providers: {
+      kubernetes: {
+        namespace: envNamespace
+      }
+    }
+    recipePacks: [
+      recipes.id
+    ]
+  }
+}
+
+resource platform 'Radius.Core/applications@2025-08-01-preview' = {
+  name: 'platform'
+  properties: {
+    environment: env.id
+  }
+}
+
+resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
+  name: 'ghcr-creds'
+  properties: {
+    environment: env.id
+    application: platform.id
     type: 'generic'
     data: {
       username: {
@@ -62,45 +104,6 @@ resource registryCreds 'Applications.Core/secretStores@2023-10-01-preview' = {
       }
       password: {
         value: registryPassword
-      }
-    }
-  }
-}
-
-resource env 'Applications.Core/environments@2023-10-01-preview' = {
-  name: 'default'
-  properties: {
-    compute: {
-      kind: 'kubernetes'
-      resourceId: 'self'
-      namespace: envNamespace
-    }
-    recipeConfig: {
-      terraform: {
-        authentication: any({
-          registries: {
-            '${registryHost}': {
-              secret: registryCreds.id
-            }
-          }
-        })
-      }
-    }
-    recipes: {
-      'Radius.Compute/containerImages': {
-        default: {
-          templateKind: 'terraform'
-          templatePath: containerImagesTemplatePath
-          parameters: {
-            registry: registryPath
-          }
-        }
-      }
-      'Radius.Compute/containers': {
-        default: {
-          templateKind: 'terraform'
-          templatePath: containersTemplatePath
-        }
       }
     }
   }
