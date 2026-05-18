@@ -140,6 +140,26 @@ jobs:
       - name: '[PE] Register resource types'
         run: make register-types
 
+      - name: 'Sanity check GHCR auth'
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          AUTH=$(printf '%s:%s' "$GHCR_USERNAME" "$GHCR_TOKEN" | base64 -w0)
+          echo "Username: $GHCR_USERNAME (len $(echo -n "$GHCR_USERNAME" | wc -c))"
+          echo "Token   : ghs_*** (len $(echo -n "$GHCR_TOKEN" | wc -c))"
+          STATUS=$(curl -s -o /tmp/ghcr.json -w "%{http_code}" \
+            -H "Authorization: Basic $AUTH" \
+            "https://ghcr.io/token?scope=repository:${REPO_LC}/demo-image:pull,push&service=ghcr.io")
+          echo "ghcr.io/token status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            cat /tmp/ghcr.json
+            exit 1
+          fi
+          echo "OK: ghcr.io accepted credentials."
+
       - name: '[PE] Build Bicep extensions'
         run: |
           rad bicep download
