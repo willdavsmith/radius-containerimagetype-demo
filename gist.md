@@ -72,8 +72,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         recipeLocation: containerImagesTemplatePath
         parameters: {
           registry: registryPath
-          registrySecretName: 'ghcr-creds'
-          registrySecretNamespace: envNamespace
+          registryCredentials: ghcrCreds.id
         }
       }
       'Radius.Compute/containers': {
@@ -93,17 +92,10 @@ resource env 'Radius.Core/environments@2025-08-01-preview' = {
   }
 }
 
-resource platform 'Radius.Core/applications@2025-08-01-preview' = {
-  name: 'platform'
-  location: 'global'
-  properties: { environment: env.id }
-}
-
 resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
   name: 'ghcr-creds'
   properties: {
     environment: env.id
-    application: platform.id
     kind: 'generic'
     data: {
       username: { value: registryUsername }
@@ -122,9 +114,7 @@ resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
 ```bicep
 extension radius
 extension containerImages
-// Disambiguate from the radius extension's Radius.Compute/containers
-// (which lacks imagePullSecrets).
-extension containers as ctnrs
+extension containers
 
 param environment string
 param imageTag string
@@ -145,12 +135,11 @@ resource demoImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   }
 }
 
-resource demo 'ctnrs:Radius.Compute/containers@2025-08-01-preview' = {
+resource demo 'Radius.Compute/containers@2025-08-01-preview' = {
   name: 'demo'
   properties: {
     environment: environment
     application: app.id
-    imagePullSecrets: [demoImage.properties.imagePullSecretName]
     containers: {
       demo: {
         image: demoImage.properties.image
@@ -170,20 +159,18 @@ rad deploy app.bicep \
 
 ## Flow
 
-1. PE-provided `registrySecretName` + `registrySecretNamespace` reach
-   the recipe as Terraform variables at execution time.
-2. Recipe's `kubernetes_secret` data source reads `<ns>/<name>` and
-   base64-decodes `username` + `password` (the data-source returns
-   base64, unlike the resource form).
-3. Recipe renders a Docker `config.json` to its working dir, exports
+1. Driver resolves the `registryCredentials` recipe parameter (a
+   `Radius.Security/secrets` resource ID) and projects the secret's
+   `data` into the recipe's variable scope as
+   `var.registry_credentials = { username, password }`.
+2. Recipe renders a Docker `config.json` to its working dir, exports
    `DOCKER_CONFIG`, and runs
    `buildctl build ... --output type=image,name=ghcr.io/my-org/demo-image:<tag>,push=true`
    against the in-cluster BuildKit sidecar.
-4. Recipe creates a `kubernetes.io/dockerconfigjson` Secret named
-   `<resource>-pull` in the developer's app namespace and surfaces its
-   name as `imagePullSecretName`.
-5. `containers` recipe creates a Deployment whose pod spec references
-   `imagePullSecrets: [demo-image-pull]`.
+3. Recipe materializes a `kubernetes.io/dockerconfigjson` Secret in the
+   developer's app namespace and patches that namespace's `default`
+   ServiceAccount with `imagePullSecrets: [<resource>-pull]`, so every
+   Pod in the namespace pulls without explicit wiring.
 
 ## Developer never
 
@@ -194,3 +181,4 @@ rad deploy app.bicep \
 - Hard-codes a registry hostname
 - Passes registry credentials as `rad deploy` params
 - Declares a secret of any kind
+- References the registry Secret directly
