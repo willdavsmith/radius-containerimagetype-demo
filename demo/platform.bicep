@@ -1,10 +1,9 @@
 // Platform-engineer baseline. Declares everything the developer's
-// `app.bicep` depends on: a Radius environment, a recipe pack with
-// inline parameters wiring registry credentials into the
-// containerImages recipe, a `platform` application that hosts the
-// registry secret, and the Radius.Security/secrets resource that
-// materializes the underlying Kubernetes Secret kubelet and buildctl
-// will consume.
+// `app.bicep` depends on: a Radius environment, a recipe pack
+// (wiring the registry credentials secret name into the
+// containerImages recipe), and an env-scoped Radius.Security/secrets
+// resource whose recipe materializes the underlying Kubernetes
+// Secret.
 //
 // Deploy:
 //   rad deploy platform.bicep \
@@ -35,11 +34,6 @@ param containersTemplatePath string
 @description('Kubernetes namespace the environment provisions resources into by default.')
 param envNamespace string = 'default'
 
-// Radius.Core/environments uses providers.kubernetes.namespace
-// directly as the app namespace (no <env>-<app> derivation), so the
-// platform secret lands in the same namespace as the env.
-var registrySecretNamespace = envNamespace
-
 resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: 'default-recipes'
   location: 'global'
@@ -54,8 +48,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         recipeLocation: containerImagesTemplatePath
         parameters: {
           registry: registryPath
-          registrySecretName: 'ghcr-creds'
-          registrySecretNamespace: registrySecretNamespace
+          registrySecretName: ghcrCreds.name
         }
       }
       'Radius.Compute/containers': {
@@ -81,19 +74,10 @@ resource env 'Radius.Core/environments@2025-08-01-preview' = {
   }
 }
 
-resource platform 'Radius.Core/applications@2025-08-01-preview' = {
-  name: 'platform'
-  location: 'global'
-  properties: {
-    environment: env.id
-  }
-}
-
 resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
   name: 'ghcr-creds'
   properties: {
     environment: env.id
-    application: platform.id
     kind: 'generic'
     data: {
       username: {

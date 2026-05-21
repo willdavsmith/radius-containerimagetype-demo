@@ -4,12 +4,6 @@ Two personas: PE provisions a registry secret and registers recipes
 once via Bicep; developer writes Bicep and runs `rad deploy`. Developer
 never references registry credentials and never declares a secret.
 
-No upstream `Radius.Core/*` changes. No driver changes. Everything is
-expressed with existing types: `Radius.Core/recipePacks`,
-`Radius.Core/environments`, `Radius.Core/applications`,
-`Radius.Security/secrets`, `Radius.Compute/containerImages`,
-`Radius.Compute/containers`.
-
 ## PE — one-time
 
 ```bash
@@ -72,7 +66,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         recipeLocation: containerImagesTemplatePath
         parameters: {
           registry: registryPath
-          registryCredentials: ghcrCreds.id
+          registrySecretName: ghcrCreds.name
         }
       }
       'Radius.Compute/containers': {
@@ -117,7 +111,6 @@ extension containerImages
 extension containers
 
 param environment string
-param imageTag string
 param buildContext string
 
 resource app 'Radius.Core/applications@2025-08-01-preview' = {
@@ -128,10 +121,11 @@ resource app 'Radius.Core/applications@2025-08-01-preview' = {
 resource demoImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   name: 'demo-image'
   properties: {
-    environment: environment
-    application: app.id
-    tag:         imageTag
-    build: { context: buildContext }
+    environment:        environment
+    application:        app.id
+    imageName:          'demo-image' // optional
+    imageTag:           'latest' // optional
+    build:              { context: buildContext }
   }
 }
 
@@ -156,29 +150,3 @@ rad deploy app.bicep \
   -p imageTag="$(git rev-parse HEAD)" \
   -p buildContext="git::https://github.com/my-org/my-app.git//.?ref=$(git rev-parse HEAD)"
 ```
-
-## Flow
-
-1. Driver resolves the `registryCredentials` recipe parameter (a
-   `Radius.Security/secrets` resource ID) and projects the secret's
-   `data` into the recipe's variable scope as
-   `var.registry_credentials = { username, password }`.
-2. Recipe renders a Docker `config.json` to its working dir, exports
-   `DOCKER_CONFIG`, and runs
-   `buildctl build ... --output type=image,name=ghcr.io/my-org/demo-image:<tag>,push=true`
-   against the in-cluster BuildKit sidecar.
-3. Recipe materializes a `kubernetes.io/dockerconfigjson` Secret in the
-   developer's app namespace and patches that namespace's `default`
-   ServiceAccount with `imagePullSecrets: [<resource>-pull]`, so every
-   Pod in the namespace pulls without explicit wiring.
-
-## Developer never
-
-- Runs `docker build` / `docker push`
-- Installs a Docker daemon
-- Runs `kubectl create secret docker-registry`
-- Patches a ServiceAccount with `imagePullSecrets`
-- Hard-codes a registry hostname
-- Passes registry credentials as `rad deploy` params
-- Declares a secret of any kind
-- References the registry Secret directly

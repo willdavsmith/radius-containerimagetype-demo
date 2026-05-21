@@ -18,16 +18,16 @@ resource app 'Radius.Core/applications@2025-08-01-preview' = {
   }
 }
 
-// Build and push the container image. The platform engineer wired
-// registry credentials into the recipe at registration time; the
-// recipe materializes a per-resource pull Secret in this application's
-// namespace and surfaces its name as `imagePullSecretName`.
+// Build and push the container image. Registry credentials are a
+// platform-engineer concern: the PE wired `registrySecretName` into
+// the recipe pack (see platform.bicep), so this resource carries no
+// secret reference at all.
 resource demoImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   name: 'demo-image'
   properties: {
     environment: environment
     application: app.id
-    tag: imageTag
+    imageTag: imageTag
     build: {
       context: buildContext
     }
@@ -39,7 +39,6 @@ resource demo 'ctnrs:Radius.Compute/containers@2025-08-01-preview' = {
   properties: {
     environment: environment
     application: app.id
-    imagePullSecrets: [demoImage.properties.imagePullSecretName]
     containers: {
       demo: {
         image: demoImage.properties.image
