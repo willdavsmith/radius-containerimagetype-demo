@@ -34,6 +34,12 @@ param containersTemplatePath string
 @description('Kubernetes namespace the environment provisions resources into by default.')
 param envNamespace string = 'default'
 
+// Use a local `var` for the secret name so the recipePack can
+// reference it without creating a symbolic dependency on the
+// ghcrCreds resource (which would form an env → recipes → ghcrCreds
+// → env cycle, BCP080).
+var ghcrCredsName = 'ghcr-creds'
+
 resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: 'default-recipes'
   location: 'global'
@@ -48,7 +54,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         recipeLocation: containerImagesTemplatePath
         parameters: {
           registry: registryPath
-          registrySecretName: ghcrCreds.name
+          registrySecretName: ghcrCredsName
         }
       }
       'Radius.Compute/containers': {
@@ -75,7 +81,7 @@ resource env 'Radius.Core/environments@2025-08-01-preview' = {
 }
 
 resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
-  name: 'ghcr-creds'
+  name: ghcrCredsName
   properties: {
     environment: env.id
     kind: 'generic'
