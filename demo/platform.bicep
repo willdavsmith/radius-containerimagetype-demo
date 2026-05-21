@@ -1,29 +1,26 @@
-// Platform-engineer baseline. Declares everything the developer's
-// `app.bicep` depends on: a Radius environment, a recipe pack
-// (wiring the registry credentials secret name into the
-// containerImages recipe), and an env-scoped Radius.Security/secrets
-// resource whose recipe materializes the underlying Kubernetes
-// Secret.
+// Platform-engineer baseline. Declares the recipe pack and the
+// environment that references it. Registry credentials live in
+// `secrets.bicep`, deployed separately, so the env + recipePack +
+// secret never form a symbolic cycle (BCP080) and credential
+// rotation is decoupled from recipe config.
 //
-// Deploy:
+// The recipePack wires the literal string 'ghcr-creds' as the
+// `registrySecretName` parameter; secrets.bicep declares a
+// Radius.Security/secrets of that exact name in the same env.
+//
+// Deploy order:
 //   rad deploy platform.bicep \
-//     -p registryUsername=$GHCR_USER \
-//     -p registryPassword=$GHCR_TOKEN \
 //     -p registryPath=ghcr.io/myorg \
 //     -p containerImagesTemplatePath='git::https://…?ref=<sha>' \
 //     -p containersTemplatePath='git::https://…?ref=<sha>'
+//   rad deploy secrets.bicep \
+//     -p registryUsername=$GHCR_USER \
+//     -p registryPassword=$GHCR_TOKEN
 
 extension radius
 
 @description('Registry path the containerImages recipe pushes images to. E.g. ghcr.io/myorg.')
 param registryPath string
-
-@description('Registry username.')
-param registryUsername string
-
-@description('Registry password / PAT.')
-@secure()
-param registryPassword string
 
 @description('Terraform template path for the Radius.Compute/containerImages recipe.')
 param containerImagesTemplatePath string
@@ -33,12 +30,6 @@ param containersTemplatePath string
 
 @description('Kubernetes namespace the environment provisions resources into by default.')
 param envNamespace string = 'default'
-
-// Use a local `var` for the secret name so the recipePack can
-// reference it without creating a symbolic dependency on the
-// ghcrCreds resource (which would form an env → recipes → ghcrCreds
-// → env cycle, BCP080).
-var ghcrCredsName = 'ghcr-creds'
 
 resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: 'default-recipes'
@@ -54,7 +45,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         recipeLocation: containerImagesTemplatePath
         parameters: {
           registry: registryPath
-          registrySecretName: ghcrCredsName
+          registrySecretName: 'ghcr-creds'
         }
       }
       'Radius.Compute/containers': {
@@ -77,21 +68,5 @@ resource env 'Radius.Core/environments@2025-08-01-preview' = {
     recipePacks: [
       recipes.id
     ]
-  }
-}
-
-resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
-  name: ghcrCredsName
-  properties: {
-    environment: env.id
-    kind: 'generic'
-    data: {
-      username: {
-        value: registryUsername
-      }
-      password: {
-        value: registryPassword
-      }
-    }
   }
 }

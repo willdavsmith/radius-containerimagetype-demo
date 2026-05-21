@@ -29,14 +29,19 @@ rad recipe register default \
   --template-path "git::https://github.com/radius-project/resource-types-contrib.git//Security/secrets/recipes/kubernetes/terraform"
 
 # 4. Deploy platform.bicep — declares the recipePack (which registers
-#    the containerImages + containers recipes), the env, the platform
-#    app, and the ghcr-creds secret in one shot.
+#    the containerImages + containers recipes) and the env.
 rad deploy platform.bicep \
-  -p registryUsername="$GHCR_USER" \
-  -p registryPassword="$GHCR_TOKEN" \
   -p registryPath="ghcr.io/my-org" \
   -p containerImagesTemplatePath="git::https://github.com/radius-project/resource-types-contrib.git//Compute/containerImages/recipes/kubernetes/terraform" \
   -p containersTemplatePath="git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform"
+
+# 5. Deploy secrets.bicep — declares the registry credentials secret.
+#    Separate from platform.bicep so the env + recipePack + secret
+#    never form a symbolic cycle (BCP080) and rotation is decoupled
+#    from recipe config.
+rad deploy secrets.bicep \
+  -p registryUsername="$GHCR_USER" \
+  -p registryPassword="$GHCR_TOKEN"
 ```
 
 `platform.bicep`:
@@ -45,9 +50,6 @@ rad deploy platform.bicep \
 extension radius
 
 param registryPath string
-param registryUsername string
-@secure()
-param registryPassword string
 param containerImagesTemplatePath string
 param containersTemplatePath string
 param envNamespace string = 'default'
@@ -66,7 +68,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         recipeLocation: containerImagesTemplatePath
         parameters: {
           registry: registryPath
-          registrySecretName: ghcrCreds.name
+          registrySecretName: 'ghcr-creds'
         }
       }
       'Radius.Compute/containers': {
@@ -84,6 +86,20 @@ resource env 'Radius.Core/environments@2025-08-01-preview' = {
     providers: { kubernetes: { namespace: envNamespace } }
     recipePacks: [ recipes.id ]
   }
+}
+```
+
+`secrets.bicep`:
+
+```bicep
+extension radius
+
+param registryUsername string
+@secure()
+param registryPassword string
+
+resource env 'Radius.Core/environments@2025-08-01-preview' existing = {
+  name: 'default'
 }
 
 resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
