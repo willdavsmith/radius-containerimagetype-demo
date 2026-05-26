@@ -146,14 +146,21 @@ runs:
     - name: '[Developer] Verify container is running'
       shell: bash
       run: |
-        NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2)
+        NS=$(kubectl get deployment -A -l radapp.io/application=demo,radapp.io/resource=demo \
+               -o jsonpath='{.items[0].metadata.namespace}')
+        if [ -z "$NS" ]; then
+          echo "Could not find demo deployment via radapp.io labels; dumping all deployments:" >&2
+          kubectl get deployment -A
+          exit 1
+        fi
+        echo "Found demo deployment in namespace: $NS"
+        echo "NS=$NS" >> "$GITHUB_ENV"
         kubectl wait --for=condition=available deployment/demo -n "$NS" --timeout=300s
         echo "✅ Container deployment is available"
 
     - name: '[Developer] Verify app responds'
       shell: bash
       run: |
-        NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2)
         kubectl port-forward -n "$NS" deployment/demo 3000:3000 &
         PF_PID=$!
         sleep 5
@@ -182,8 +189,9 @@ runs:
         echo "=== buildkitd sidecar logs ==="
         kubectl logs -n radius-system -l app.kubernetes.io/name=dynamic-rp -c buildkitd --tail=200 2>/dev/null || true
         echo ""
-        NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2 || echo "unknown")
-        if [ "$NS" != "unknown" ]; then
+        NS=$(kubectl get deployment -A -l radapp.io/application=demo,radapp.io/resource=demo \
+               -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo "")
+        if [ -n "$NS" ]; then
           echo "=== Pod logs in $NS ==="
           kubectl logs --all-containers --tail=50 -n "$NS" -l "radapp.io/resource" 2>/dev/null || true
           echo ""
