@@ -1,0 +1,81 @@
+name: E2E (kind)
+
+on:
+  push:
+    branches: [main, docker-provider]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      CLUSTER_NAME: radius-e2e
+      DYNAMIC_RP_REGISTRY: localhost
+      DYNAMIC_RP_TAG: e2e
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Derive registry path
+        id: registry
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "path=ghcr.io/${REPO}" >> "$GITHUB_OUTPUT"
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name $CLUSTER_NAME --wait 120s
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: radius/go.mod
+          cache-dependency-path: radius/go.sum
+
+      - name: Build dynamic-rp image
+        working-directory: radius
+        run: |
+          make docker-build-dynamic-rp \
+            DOCKER_REGISTRY=$DYNAMIC_RP_REGISTRY \
+            DOCKER_TAG_VERSION=$DYNAMIC_RP_TAG
+
+      - name: Side-load images into kind
+        run: |
+          kind load docker-image "$DYNAMIC_RP_REGISTRY/dynamic-rp:$DYNAMIC_RP_TAG" --name $CLUSTER_NAME
+          # The terraform-init init container pulls alpine from Docker
+          # Hub, which is rate-limited anonymously in CI. Side-load it.
+          docker pull alpine:3.23
+          kind load docker-image alpine:3.23 --name $CLUSTER_NAME
+
+      - name: Resolve submodule SHA
+        id: submodule
+        run: echo "sha=$(git -C resource-types-contrib rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run E2E
+        uses: ./.github/actions/radius-e2e
+        with:
+          registry-path: ${{ steps.registry.outputs.path }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          image-tag: ${{ github.sha }}
+          build-context: git::https://github.com/${{ github.repository }}.git//demo/app?ref=${{ github.sha }}
+          containerimages-template-path: git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}
+          containers-template-path: git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${{ steps.submodule.outputs.sha }}
+          dynamic-rp-image: ${{ env.DYNAMIC_RP_REGISTRY }}/dynamic-rp
+          dynamic-rp-tag: ${{ env.DYNAMIC_RP_TAG }}
+
+      - name: Cleanup cluster
+        if: always()
+        run: kind delete cluster --name $CLUSTER_NAME 2>/dev/null || true

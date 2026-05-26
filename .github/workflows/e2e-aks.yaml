@@ -1,0 +1,93 @@
+name: E2E (AKS)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # for Azure OIDC federation
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      DYNAMIC_RP_TAG: ${{ github.sha }}
+      GHCR_PULL_SECRET: ghcr-pull
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Derive registry path
+        id: registry
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "path=ghcr.io/${REPO}" >> "$GITHUB_OUTPUT"
+          echo "dynamic_rp=ghcr.io/${REPO}/dynamic-rp" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" \
+            --name "${{ secrets.AKS_CLUSTER_NAME }}" \
+            --overwrite-existing
+          kubectl get nodes
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: radius/go.mod
+          cache-dependency-path: radius/go.sum
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push dynamic-rp image to GHCR
+        working-directory: radius
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          REGISTRY=ghcr.io/${REPO}
+          make docker-build-dynamic-rp \
+            DOCKER_REGISTRY=$REGISTRY \
+            DOCKER_TAG_VERSION=$DYNAMIC_RP_TAG
+          docker push "$REGISTRY/dynamic-rp:$DYNAMIC_RP_TAG"
+
+      - name: Create radius-system namespace and GHCR pull secret
+        run: |
+          kubectl create namespace radius-system 2>/dev/null || true
+          kubectl create secret docker-registry "$GHCR_PULL_SECRET" \
+            --namespace radius-system \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Resolve submodule SHA
+        id: submodule
+        run: echo "sha=$(git -C resource-types-contrib rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run E2E
+        uses: ./.github/actions/radius-e2e
+        with:
+          registry-path: ${{ steps.registry.outputs.path }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          image-tag: ${{ github.sha }}
+          build-context: git::https://github.com/${{ github.repository }}.git//demo/app?ref=${{ github.sha }}
+          containerimages-template-path: git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}
+          containers-template-path: git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${{ steps.submodule.outputs.sha }}
+          dynamic-rp-image: ${{ steps.registry.outputs.dynamic_rp }}
+          dynamic-rp-tag: ${{ env.DYNAMIC_RP_TAG }}
+          image-pull-secret-name: ${{ env.GHCR_PULL_SECRET }}
+
+      - name: Uninstall Radius
+        if: always()
+        run: rad uninstall kubernetes 2>/dev/null || true

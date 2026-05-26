@@ -1,0 +1,201 @@
+name: Run Radius containerImages E2E
+description: >
+  Cluster-agnostic Radius install + PE setup + developer deploy +
+  verify. Assumes kubeconfig is already configured against the
+  target cluster and the dynamic-rp image is reachable from the
+  cluster (either side-loaded for kind/k3d or pushed to a remote
+  registry the cluster can pull from).
+
+inputs:
+  registry-path:
+    description: Full registry+namespace the containerImages recipe pushes built images to (e.g. ghcr.io/owner/repo).
+    required: true
+  registry-username:
+    description: Username for the build/push registry.
+    required: true
+  registry-password:
+    description: Password / token for the build/push registry.
+    required: true
+  image-tag:
+    description: Tag for the developer's built application image.
+    required: true
+  build-context:
+    description: Git URL the developer recipe builds from (rad deploy app.bicep -p buildContext=...).
+    required: true
+  containerimages-template-path:
+    description: "git:: URL the containerImages recipe is fetched from."
+    required: true
+  containers-template-path:
+    description: "git:: URL the containers recipe is fetched from."
+    required: true
+  dynamic-rp-image:
+    description: Image repo (no tag) for the dynamic-rp container. Loaded into kind/k3d or pulled from a remote registry.
+    required: true
+  dynamic-rp-tag:
+    description: Tag for the dynamic-rp image.
+    required: true
+  image-pull-secret-name:
+    description: Optional name of a docker-registry secret to attach as global.imagePullSecrets. Empty for kind/k3d.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: radius/go.mod
+        cache-dependency-path: radius/go.sum
+
+    - name: Install Radius CLI
+      shell: bash
+      working-directory: radius
+      run: |
+        make build-binaries
+        sudo cp dist/linux_amd64/release/rad /usr/local/bin/rad
+        rad version
+
+    - name: Install Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+
+    - name: Install Radius from the worktree chart
+      shell: bash
+      working-directory: radius
+      env:
+        DYNAMIC_RP_IMAGE: ${{ inputs.dynamic-rp-image }}
+        DYNAMIC_RP_TAG: ${{ inputs.dynamic-rp-tag }}
+        IMAGE_PULL_SECRET: ${{ inputs.image-pull-secret-name }}
+      run: |
+        EXTRA=""
+        if [ -n "$IMAGE_PULL_SECRET" ]; then
+          # Make sure the secret exists in radius-system before the
+          # deployment tries to pull. rad install creates the namespace,
+          # so create it ourselves first if needed.
+          kubectl create namespace radius-system 2>/dev/null || true
+          EXTRA="--set global.imagePullSecrets[0].name=$IMAGE_PULL_SECRET"
+        fi
+        rad install kubernetes \
+          --reinstall \
+          --chart deploy/Chart \
+          --set dynamicrp.image=$DYNAMIC_RP_IMAGE \
+          --set dynamicrp.tag=$DYNAMIC_RP_TAG \
+          $EXTRA
+        kubectl wait --for=condition=available deployment --all -n radius-system --timeout=300s
+        POD=$(kubectl get pods -n radius-system -l app.kubernetes.io/name=dynamic-rp -o jsonpath='{.items[0].metadata.name}')
+        kubectl exec -n radius-system "$POD" -c buildkitd -- buildctl --addr tcp://127.0.0.1:1234 debug workers
+
+    - name: '[PE] Create resource group, env, and workspace'
+      shell: bash
+      run: |
+        rad group create default
+        rad env create default --preview --group default
+        rad workspace create kubernetes default \
+          --context "$(kubectl config current-context)" \
+          --group default
+        rad workspace switch default
+        rad env switch default --preview
+
+    - name: '[PE] Register resource types'
+      shell: bash
+      run: make register-types
+
+    - name: '[PE] Build Bicep extensions'
+      shell: bash
+      run: |
+        rad bicep download
+        make build
+
+    - name: '[PE] Provision recipe pack and environment'
+      shell: bash
+      working-directory: demo
+      env:
+        CONTAINERIMAGES_TEMPLATE: ${{ inputs.containerimages-template-path }}
+        CONTAINERS_TEMPLATE: ${{ inputs.containers-template-path }}
+        REGISTRY_PATH: ${{ inputs.registry-path }}
+      run: |
+        rad deploy platform.bicep \
+          -p registryPath="${REGISTRY_PATH}" \
+          -p containerImagesTemplatePath="${CONTAINERIMAGES_TEMPLATE}" \
+          -p containersTemplatePath="${CONTAINERS_TEMPLATE}"
+
+    - name: '[PE] Provision registry credentials secret'
+      shell: bash
+      working-directory: demo
+      env:
+        REG_USER: ${{ inputs.registry-username }}
+        REG_PASS: ${{ inputs.registry-password }}
+      run: |
+        rad deploy secrets.bicep \
+          -p registryUsername="${REG_USER}" \
+          -p registryPassword="${REG_PASS}"
+
+    - name: '[Developer] Deploy application'
+      shell: bash
+      working-directory: demo
+      env:
+        IMAGE_TAG: ${{ inputs.image-tag }}
+        BUILD_CONTEXT: ${{ inputs.build-context }}
+      run: |
+        rad deploy app.bicep \
+          -p imageTag="${IMAGE_TAG}" \
+          -p buildContext="${BUILD_CONTEXT}"
+
+    - name: '[Developer] Verify container is running'
+      shell: bash
+      run: |
+        NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2)
+        kubectl wait --for=condition=available deployment/demo -n "$NS" --timeout=300s
+        echo "✅ Container deployment is available"
+
+    - name: '[Developer] Verify app responds'
+      shell: bash
+      run: |
+        NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2)
+        kubectl port-forward -n "$NS" deployment/demo 3000:3000 &
+        PF_PID=$!
+        sleep 5
+        RESPONSE=$(curl -sf http://localhost:3000)
+        kill $PF_PID || true
+        echo "Response: $RESPONSE"
+        echo "$RESPONSE" | grep -q "Hello"
+        echo "✅ App responded correctly"
+
+    - name: Dump diagnostics on failure
+      if: failure()
+      shell: bash
+      run: |
+        echo "=== Pods ==="
+        kubectl get pods --all-namespaces
+        echo ""
+        echo "=== radius-system pod descriptions ==="
+        kubectl describe pods -n radius-system 2>/dev/null || true
+        echo ""
+        echo "=== terraform-init logs ==="
+        kubectl logs -n radius-system -l app.kubernetes.io/name=dynamic-rp -c terraform-init --tail=200 2>/dev/null || true
+        echo ""
+        echo "=== dynamic-rp logs (recipe runner) ==="
+        kubectl logs -n radius-system -l app.kubernetes.io/name=dynamic-rp -c dynamic-rp --tail=200 2>/dev/null || true
+        echo ""
+        echo "=== buildkitd sidecar logs ==="
+        kubectl logs -n radius-system -l app.kubernetes.io/name=dynamic-rp -c buildkitd --tail=200 2>/dev/null || true
+        echo ""
+        NS=$(kubectl get namespaces -o name | grep default-demo | head -1 | cut -d/ -f2 || echo "unknown")
+        if [ "$NS" != "unknown" ]; then
+          echo "=== Pod logs in $NS ==="
+          kubectl logs --all-containers --tail=50 -n "$NS" -l "radapp.io/resource" 2>/dev/null || true
+          echo ""
+          echo "=== Pod descriptions ==="
+          kubectl describe pods -n "$NS" 2>/dev/null || true
+        fi
+        echo ""
+        echo "=== Radius recipes ==="
+        rad recipe list 2>/dev/null || true
+
+    - name: Cleanup Radius resources
+      if: always()
+      shell: bash
+      run: |
+        rad application delete demo 2>/dev/null || true
