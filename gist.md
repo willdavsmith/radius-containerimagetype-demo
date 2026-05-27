@@ -302,9 +302,6 @@ resource api 'Radius.Compute/containers@2025-08-01-preview' = {
         image: 'ghcr.io/my-org/log-forwarder:1.4.0'
       }
     }
-    connections: {
-      apiImage: { source: apiImage.id }
-    }
   }
 }
 ```
