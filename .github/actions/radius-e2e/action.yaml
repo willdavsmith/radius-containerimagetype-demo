@@ -90,12 +90,12 @@ runs:
     - name: '[PE] Create workspace, group, and environment'
       shell: bash
       run: |
+        rad group create default
+        rad env create default --preview --group default
         rad workspace create kubernetes default \
           --context "$(kubectl config current-context)" \
           --group default
         rad workspace switch default
-        rad group create default
-        rad env create default
         rad env switch default --preview
 
     - name: '[PE] Register resource types'
