@@ -81,7 +81,7 @@ jobs:
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           image-tag: ${{ github.sha }}
-          build-context: git::https://github.com/${{ github.repository }}.git//demo/app?ref=${{ github.sha }}
+          build-source: git::https://github.com/${{ github.repository }}.git//demo/app?ref=${{ github.sha }}
           containerimages-template-path: git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}
           containers-template-path: git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${{ steps.submodule.outputs.sha }}
           dynamic-rp-image: ${{ steps.registry.outputs.dynamic_rp }}

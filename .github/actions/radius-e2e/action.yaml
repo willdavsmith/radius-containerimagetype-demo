@@ -19,8 +19,8 @@ inputs:
   image-tag:
     description: Tag for the developer's built application image.
     required: true
-  build-context:
-    description: Git URL the developer recipe builds from (rad deploy app.bicep -p buildContext=...).
+  build-source:
+    description: Git URL the developer recipe builds from (rad deploy app.bicep -p buildSource=...).
     required: true
   containerimages-template-path:
     description: "git:: URL the containerImages recipe is fetched from."
@@ -87,16 +87,13 @@ runs:
         POD=$(kubectl get pods -n radius-system -l app.kubernetes.io/name=dynamic-rp -o jsonpath='{.items[0].metadata.name}')
         kubectl exec -n radius-system "$POD" -c buildkitd -- buildctl --addr tcp://127.0.0.1:1234 debug workers
 
-    - name: '[PE] Create resource group, env, and workspace'
+    - name: '[PE] Create workspace'
       shell: bash
       run: |
-        rad group create default
-        rad env create default --preview --group default
         rad workspace create kubernetes default \
           --context "$(kubectl config current-context)" \
           --group default
         rad workspace switch default
-        rad env switch default --preview
 
     - name: '[PE] Register resource types'
       shell: bash
@@ -137,11 +134,11 @@ runs:
       working-directory: demo
       env:
         IMAGE_TAG: ${{ inputs.image-tag }}
-        BUILD_CONTEXT: ${{ inputs.build-context }}
+        BUILD_SOURCE: ${{ inputs.build-source }}
       run: |
         rad deploy app.bicep \
           -p imageTag="${IMAGE_TAG}" \
-          -p buildContext="${BUILD_CONTEXT}"
+          -p buildSource="${BUILD_SOURCE}"
 
     - name: '[Developer] Verify container is running'
       shell: bash

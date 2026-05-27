@@ -33,7 +33,6 @@ param envNamespace string = 'default'
 
 resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: 'default-recipes'
-  location: 'global'
   properties: {
     recipes: {
       'Radius.Security/secrets': {
@@ -58,7 +57,6 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
 
 resource env 'Radius.Core/environments@2025-08-01-preview' = {
   name: 'default'
-  location: 'global'
   properties: {
     providers: {
       kubernetes: {
