@@ -116,10 +116,9 @@ resource demoImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: environment
     application: app.id
-    name:   'demo-image'  // optional
-    tag:    'latest'      // optional
+    tag: 'latest' // optional
     build: {
-      source:     'git::https://github.com/my-org/my-app.git#main'
+      source: 'git::https://github.com/my-org/my-app.git#main'
       dockerfile: 'Dockerfile' // optional, default 'Dockerfile'
     }
   }
@@ -164,7 +163,7 @@ resource frontendImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    tag:    'dev'
+    tag: 'dev'
     build: {
       source: './frontend'
     }
@@ -183,7 +182,7 @@ resource frontendImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    tag:    'a1b2c3d'
+    tag: 'a1b2c3d'
     build: {
       source: 'git::https://github.com/alice/myapp.git#a1b2c3d:frontend'
     }
@@ -199,9 +198,9 @@ resource apiImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    tag:    'a1b2c3d'
+    tag: 'a1b2c3d'
     build: {
-      source:     'git::https://github.com/alice/myapp.git#a1b2c3d'
+      source: 'git::https://github.com/alice/myapp.git#a1b2c3d'
       dockerfile: 'services/api/Dockerfile'
     }
   }
@@ -212,9 +211,9 @@ resource workerImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    tag:    'a1b2c3d'
+    tag: 'a1b2c3d'
     build: {
-      source:     'git::https://github.com/alice/myapp.git#a1b2c3d'
+      source: 'git::https://github.com/alice/myapp.git#a1b2c3d'
       dockerfile: 'services/worker/Dockerfile'
     }
   }
@@ -235,11 +234,10 @@ resource appProd 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    image:   'app'
-    tag:    'a1b2c3d'
+    tag: 'a1b2c3d'
     build: {
-      source:     'git::https://github.com/alice/myapp.git#a1b2c3d'
-      dockerfile: 'Dockerfile'        // optional, this is the default
+      source: 'git::https://github.com/alice/myapp.git#a1b2c3d'
+      dockerfile: 'Dockerfile' // optional, default 'Dockerfile'
     }
   }
 }
@@ -249,10 +247,9 @@ resource appDebug 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    image:   'app'
-    tag:    'a1b2c3d-debug'      // disambiguate in the registry
+    tag: 'a1b2c3d'
     build: {
-      source:     'git::https://github.com/alice/myapp.git#a1b2c3d'
+      source: 'git::https://github.com/alice/myapp.git#a1b2c3d'
       dockerfile: 'Dockerfile.debug'
     }
   }
