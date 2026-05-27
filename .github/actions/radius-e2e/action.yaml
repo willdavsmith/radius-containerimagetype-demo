@@ -87,13 +87,16 @@ runs:
         POD=$(kubectl get pods -n radius-system -l app.kubernetes.io/name=dynamic-rp -o jsonpath='{.items[0].metadata.name}')
         kubectl exec -n radius-system "$POD" -c buildkitd -- buildctl --addr tcp://127.0.0.1:1234 debug workers
 
-    - name: '[PE] Create workspace'
+    - name: '[PE] Create workspace, group, and environment'
       shell: bash
       run: |
         rad workspace create kubernetes default \
           --context "$(kubectl config current-context)" \
           --group default
         rad workspace switch default
+        rad group create default
+        rad env create default
+        rad env switch default --preview
 
     - name: '[PE] Register resource types'
       shell: bash
