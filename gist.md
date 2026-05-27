@@ -116,10 +116,10 @@ resource demoImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: environment
     application: app.id
-    imageName:   'demo-image'  // optional
-    imageTag:    'latest'      // optional
+    name:   'demo-image'  // optional
+    tag:    'latest'      // optional
     build: {
-      source:     buildSource
+      source:     'git::https://github.com/my-org/my-app.git#main'
       dockerfile: 'Dockerfile' // optional, default 'Dockerfile'
     }
   }
@@ -136,13 +136,12 @@ resource demo 'Radius.Compute/containers@2025-08-01-preview' = {
         ports: { web: { containerPort: 3000 } }
       }
     }
-    connections: { demoContainerImage: { source: demoImage.id } }
   }
 }
 ```
 
 ```bash
-rad deploy app.bicep -p buildSource="git::https://github.com/my-org/my-app.git#main"
+rad deploy app.bicep
 ```
 
 > Builds produce a multi-arch (`linux/amd64` + `linux/arm64`) manifest
@@ -165,7 +164,7 @@ resource frontendImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    imageTag:    'dev'
+    tag:    'dev'
     build: {
       source: './frontend'
     }
@@ -184,7 +183,7 @@ resource frontendImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    imageTag:    'a1b2c3d'
+    tag:    'a1b2c3d'
     build: {
       source: 'git::https://github.com/alice/myapp.git#a1b2c3d:frontend'
     }
@@ -200,7 +199,7 @@ resource apiImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    imageTag:    'a1b2c3d'
+    tag:    'a1b2c3d'
     build: {
       source:     'git::https://github.com/alice/myapp.git#a1b2c3d'
       dockerfile: 'services/api/Dockerfile'
@@ -213,7 +212,7 @@ resource workerImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    imageTag:    'a1b2c3d'
+    tag:    'a1b2c3d'
     build: {
       source:     'git::https://github.com/alice/myapp.git#a1b2c3d'
       dockerfile: 'services/worker/Dockerfile'
@@ -236,8 +235,8 @@ resource appProd 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    imageName:   'app'
-    imageTag:    'a1b2c3d'
+    image:   'app'
+    tag:    'a1b2c3d'
     build: {
       source:     'git::https://github.com/alice/myapp.git#a1b2c3d'
       dockerfile: 'Dockerfile'        // optional, this is the default
@@ -250,8 +249,8 @@ resource appDebug 'Radius.Compute/containerImages@2025-08-01-preview' = {
   properties: {
     environment: env.id
     application: app.id
-    imageName:   'app'
-    imageTag:    'a1b2c3d-debug'      // disambiguate in the registry
+    image:   'app'
+    tag:    'a1b2c3d-debug'      // disambiguate in the registry
     build: {
       source:     'git::https://github.com/alice/myapp.git#a1b2c3d'
       dockerfile: 'Dockerfile.debug'
