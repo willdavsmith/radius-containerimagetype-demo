@@ -87,7 +87,6 @@ resource ghcrCreds 'Radius.Security/secrets@2025-08-01-preview' = {
   name: 'ghcr-creds'
   properties: {
     environment: env.id
-    kind: 'generic'
     data: {
       username: { value: registryUsername }
       password: { value: registryPassword }
