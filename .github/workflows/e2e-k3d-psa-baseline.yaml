@@ -38,6 +38,26 @@ jobs:
           curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
           k3d version
 
+      - name: Loosen host sysctls for unprivileged user namespaces
+        # Ubuntu 24.04+ (which GHA ubuntu-latest is based on) defaults
+        # kernel.apparmor_restrict_unprivileged_userns=1, which prevents
+        # unprivileged processes inside containers from calling
+        # unshare(CLONE_NEWUSER). The rootless BuildKit sidecar's
+        # rootlesskit shim needs this even when the pod has hostUsers: false
+        # (rootlesskit doesn't yet detect that it's already in a user
+        # namespace). Documented in
+        # https://github.com/moby/buildkit/blob/master/docs/rootless.md
+        # ("Ubuntu, 24.04 or later").
+        #
+        # This is a Linux-distro-level setting that real-world Ubuntu 24.04+
+        # node operators would need to apply too -- it's not specific to
+        # k3d. Also bump user.max_user_namespaces defensively.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo sysctl -w user.max_user_namespaces=63359
+          echo "Sysctl after:"
+          sysctl kernel.apparmor_restrict_unprivileged_userns user.max_user_namespaces
+
       - name: Create k3d cluster
         # K3s v1.34+ embeds containerd 2.x which is required for
         # UserNamespacesSupport (the dynamic-rp Pod sets hostUsers: false
