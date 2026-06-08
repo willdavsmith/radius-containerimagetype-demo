@@ -1,0 +1,203 @@
+name: E2E (AKS, PSA baseline)
+
+# Validates that the radius chart (including the rootless BuildKit
+# sidecar that backs Radius.Compute/containerImages) deploys cleanly
+# into a namespace under Pod Security Admission "baseline" enforcement
+# on a real AKS cluster -- where Azure Linux 3 / Ubuntu 24.04 + containerd
+# 2.0 + K8s 1.32+ make user namespaces (hostUsers: false) work
+# end-to-end. Unlike the k3d variant of this workflow, real AKS doesn't
+# have the Docker-in-Docker AppArmor restriction that blocks rootless
+# BuildKit from creating user namespaces, so this is the authoritative
+# baseline validation.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # for Azure OIDC federation
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      DYNAMIC_RP_TAG: ${{ github.sha }}
+      GHCR_PULL_SECRET: ghcr-pull
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Derive registry path
+        id: registry
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "path=ghcr.io/${REPO}" >> "$GITHUB_OUTPUT"
+          echo "dynamic_rp=ghcr.io/${REPO}/dynamic-rp" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group "${{ secrets.AKS_RESOURCE_GROUP }}" \
+            --name "${{ secrets.AKS_CLUSTER_NAME }}" \
+            --overwrite-existing
+          kubectl get nodes -o wide
+
+      - name: Verify cluster prerequisites for PSA baseline + user namespaces
+        # Hard requirements for the chart to satisfy PSA baseline:
+        #  - K8s >= 1.32 (containerd 2.0 default on AKS for these versions)
+        #  - containerd >= 2.0 on every node (required for hostUsers: false)
+        #  - Kernel >= 6.3 (required for idmap tmpfs, which secret volumes use)
+        # Fail fast with a clear message rather than spending 10 min
+        # discovering a vague pod-pending state.
+        run: |
+          set -e
+          K8S_MINOR=$(kubectl version -o json | jq -r '.serverVersion.minor' | tr -dc '0-9')
+          K8S_FULL=$(kubectl version -o json | jq -r '.serverVersion.gitVersion')
+          echo "Kubernetes server: $K8S_FULL (minor $K8S_MINOR)"
+          if [ "$K8S_MINOR" -lt 32 ]; then
+            echo "::error::Cluster is K8s 1.$K8S_MINOR, need >= 1.32 for containerd 2.0 default + hostUsers GA-track"
+            exit 1
+          fi
+
+          FAILED=0
+          while IFS=$'\t' read -r NAME RUNTIME KERNEL OS; do
+            echo "Node $NAME: runtime=$RUNTIME kernel=$KERNEL os=$OS"
+            # containerd 2.0+ required for UserNamespacesSupport per
+            # https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/
+            CTD_VER=$(echo "$RUNTIME" | sed -nE 's|containerd://([0-9]+)\..*|\1|p')
+            if [ -z "$CTD_VER" ] || [ "$CTD_VER" -lt 2 ]; then
+              echo "::error::Node $NAME runtime $RUNTIME does not satisfy containerd >= 2.0"
+              FAILED=1
+            fi
+            # Kernel >= 6.3 required for tmpfs idmap mounts (Secret volumes are tmpfs)
+            KMAJ=$(echo "$KERNEL" | cut -d. -f1)
+            KMIN=$(echo "$KERNEL" | cut -d. -f2)
+            if [ "$KMAJ" -lt 6 ] || { [ "$KMAJ" -eq 6 ] && [ "$KMIN" -lt 3 ]; }; then
+              echo "::error::Node $NAME kernel $KERNEL does not satisfy >= 6.3 (needed for tmpfs idmap)"
+              FAILED=1
+            fi
+          done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.containerRuntimeVersion}{"\t"}{.status.nodeInfo.kernelVersion}{"\t"}{.status.nodeInfo.osImage}{"\n"}{end}')
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::Cluster doesn't meet PSA baseline + user-namespace prereqs. Recreate node pool with Ubuntu 24.04 / Azure Linux 3.0 on K8s 1.32+."
+            exit 1
+          fi
+          echo "All prereqs satisfied."
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: radius/go.mod
+          cache-dependency-path: radius/go.sum
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push dynamic-rp image to GHCR
+        working-directory: radius
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          REGISTRY=ghcr.io/${REPO}
+          make docker-build-dynamic-rp \
+            DOCKER_REGISTRY=$REGISTRY \
+            DOCKER_TAG_VERSION=$DYNAMIC_RP_TAG
+          docker push "$REGISTRY/dynamic-rp:$DYNAMIC_RP_TAG"
+
+      - name: Pre-create namespaces with PSA baseline enforcement
+        # Label radius-system AND default (where the demo Radius app
+        # deploys its containers) with PSA enforce=baseline before any
+        # workloads land. rad install / Radius app deploy is otherwise a
+        # no-op on the namespace if it already exists. Also create the
+        # GHCR pull secret in radius-system before helm install fires.
+        run: |
+          for NS in radius-system default; do
+            kubectl create namespace "$NS" 2>/dev/null || true
+            kubectl label ns "$NS" \
+              pod-security.kubernetes.io/enforce=baseline \
+              pod-security.kubernetes.io/enforce-version=latest \
+              pod-security.kubernetes.io/audit=baseline \
+              pod-security.kubernetes.io/warn=baseline \
+              --overwrite
+          done
+          kubectl get ns -L pod-security.kubernetes.io/enforce
+          kubectl create secret docker-registry "$GHCR_PULL_SECRET" \
+            --namespace radius-system \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Resolve submodule SHA
+        id: submodule
+        run: echo "sha=$(git -C resource-types-contrib rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run E2E
+        uses: ./.github/actions/radius-e2e
+        with:
+          registry-path: ${{ steps.registry.outputs.path }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          image-tag: ${{ github.sha }}
+          build-source: git::https://github.com/${{ github.repository }}.git//demo/app?ref=${{ github.sha }}
+          containerimages-template-path: git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}
+          containers-template-path: git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${{ steps.submodule.outputs.sha }}
+          dynamic-rp-image: ${{ steps.registry.outputs.dynamic_rp }}
+          dynamic-rp-tag: ${{ env.DYNAMIC_RP_TAG }}
+          image-pull-secret-name: ${{ env.GHCR_PULL_SECRET }}
+
+      - name: Diagnostics on failure
+        if: always()
+        run: |
+          set +e
+          echo "=== Events mentioning PodSecurity in radius-system ==="
+          kubectl get events -n radius-system \
+            --field-selector type=Warning -o wide 2>/dev/null | \
+            grep -i "podsecurity\|forbidden" || echo "(none)"
+          echo "=== Events mentioning PodSecurity in default ==="
+          kubectl get events -n default \
+            --field-selector type=Warning -o wide 2>/dev/null | \
+            grep -i "podsecurity\|forbidden" || echo "(none)"
+          echo "=== Pods in radius-system (first 20) ==="
+          kubectl get pods -n radius-system -o wide 2>/dev/null | head -20 || true
+          echo "=== Recent events in radius-system ==="
+          kubectl get events -n radius-system --sort-by=.lastTimestamp -o wide 2>/dev/null | tail -40 || true
+          echo "=== dynamic-rp pod describe ==="
+          kubectl describe pod -n radius-system -l app.kubernetes.io/name=dynamic-rp 2>/dev/null | head -200 || true
+          echo "=== buildkitd / dynamic-rp / init logs ==="
+          for POD in $(kubectl get pods -n radius-system -l app.kubernetes.io/name=dynamic-rp -o name 2>/dev/null); do
+            echo "--- $POD/buildkitd ---"
+            kubectl logs -n radius-system "$POD" -c buildkitd --tail=100 2>&1 || true
+            echo "--- $POD/buildkitd (previous) ---"
+            kubectl logs -n radius-system "$POD" -c buildkitd --tail=100 --previous 2>&1 || true
+            echo "--- $POD/dynamic-rp (last 50) ---"
+            kubectl logs -n radius-system "$POD" -c dynamic-rp --tail=50 2>&1 || true
+            for IC in $(kubectl get "$POD" -n radius-system -o jsonpath='{.spec.initContainers[*].name}' 2>/dev/null); do
+              echo "--- $POD/$IC ---"
+              kubectl logs -n radius-system "$POD" -c "$IC" --tail=50 2>&1 || true
+            done
+          done
+
+      - name: Uninstall Radius
+        if: always()
+        run: |
+          rad uninstall kubernetes 2>/dev/null || true
+          # Remove PSA labels so subsequent runs on this shared cluster
+          # don't inherit them (in case the chart is later run under
+          # privileged mode for comparison).
+          for NS in radius-system default; do
+            kubectl label ns "$NS" \
+              pod-security.kubernetes.io/enforce- \
+              pod-security.kubernetes.io/enforce-version- \
+              pod-security.kubernetes.io/audit- \
+              pod-security.kubernetes.io/warn- \
+              2>/dev/null || true
+          done
