@@ -127,7 +127,9 @@ jobs:
           kubectl get nodes -o json 2>/dev/null | \
             jq -r '.items[] | {name: .metadata.name, kernel: .status.nodeInfo.kernelVersion, os: .status.nodeInfo.osImage, runtime: .status.nodeInfo.containerRuntimeVersion}' || true
           echo "=== Pods in radius-system ==="
-          kubectl get pods -n radius-system -o wide 2>/dev/null || true
+          # Truncate noisy ReplicaSet thrash (a stuck dynamic-rp deployment
+          # will spawn hundreds of pods over 5 min); just sample.
+          kubectl get pods -n radius-system -o wide 2>/dev/null | head -20 || true
           echo "=== Pod events in radius-system (recent) ==="
           kubectl get events -n radius-system --sort-by=.lastTimestamp -o wide 2>/dev/null | tail -40 || true
           echo "=== dynamic-rp pod describe ==="
