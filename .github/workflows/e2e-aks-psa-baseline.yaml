@@ -51,6 +51,41 @@ jobs:
             --overwrite-existing
           kubectl get nodes -o wide
 
+      - name: Provision Azure Linux 3 node pool for PSA baseline test
+        # The default node pool on this shared AKS cluster is still
+        # Ubuntu 22.04 + containerd 1.7 + kernel 5.15, which does NOT
+        # support the user-namespace setup the chart needs under PSA
+        # baseline. Add a temporary Azure Linux 3 node pool (kernel 6.6
+        # + containerd 2.0) for this run, cordon the legacy pool so
+        # nothing schedules there, and delete the temp pool in the
+        # always() teardown.
+        env:
+          AKS_RG: ${{ secrets.AKS_RESOURCE_GROUP }}
+          AKS_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
+          TEMP_NODEPOOL: psanp
+        run: |
+          set -e
+          # Idempotent: if a leftover pool exists from a prior failed
+          # run, reuse it rather than failing.
+          if ! az aks nodepool show -g "$AKS_RG" --cluster-name "$AKS_NAME" -n "$TEMP_NODEPOOL" >/dev/null 2>&1; then
+            echo "Adding Azure Linux 3 node pool '$TEMP_NODEPOOL'..."
+            az aks nodepool add \
+              -g "$AKS_RG" --cluster-name "$AKS_NAME" \
+              -n "$TEMP_NODEPOOL" \
+              --os-sku AzureLinux \
+              --node-count 1 \
+              --node-vm-size Standard_DS2_v2 \
+              --mode User
+          else
+            echo "Reusing existing '$TEMP_NODEPOOL' pool."
+          fi
+          # Cordon the legacy pool so the chart only lands on Azure Linux 3.
+          for N in $(kubectl get nodes -l agentpool!=$TEMP_NODEPOOL -o name); do
+            kubectl cordon "$N"
+          done
+          kubectl wait --for=condition=ready node -l agentpool=$TEMP_NODEPOOL --timeout=300s
+          kubectl get nodes -o wide
+
       - name: Verify cluster prerequisites for PSA baseline + user namespaces
         # Hard requirements for the chart to satisfy PSA baseline:
         #  - K8s >= 1.32 (containerd 2.0 default on AKS for these versions)
@@ -85,7 +120,7 @@ jobs:
               echo "::error::Node $NAME kernel $KERNEL does not satisfy >= 6.3 (needed for tmpfs idmap)"
               FAILED=1
             fi
-          done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.containerRuntimeVersion}{"\t"}{.status.nodeInfo.kernelVersion}{"\t"}{.status.nodeInfo.osImage}{"\n"}{end}')
+          done < <(kubectl get nodes -l agentpool=psanp -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.containerRuntimeVersion}{"\t"}{.status.nodeInfo.kernelVersion}{"\t"}{.status.nodeInfo.osImage}{"\n"}{end}')
 
           if [ "$FAILED" -ne 0 ]; then
             echo "::error::Cluster doesn't meet PSA baseline + user-namespace prereqs. Recreate node pool with Ubuntu 24.04 / Azure Linux 3.0 on K8s 1.32+."
@@ -186,9 +221,14 @@ jobs:
             done
           done
 
-      - name: Uninstall Radius
+      - name: Uninstall Radius and clean up node pool
         if: always()
+        env:
+          AKS_RG: ${{ secrets.AKS_RESOURCE_GROUP }}
+          AKS_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
+          TEMP_NODEPOOL: psanp
         run: |
+          set +e
           rad uninstall kubernetes 2>/dev/null || true
           # Remove PSA labels so subsequent runs on this shared cluster
           # don't inherit them (in case the chart is later run under
@@ -201,3 +241,16 @@ jobs:
               pod-security.kubernetes.io/warn- \
               2>/dev/null || true
           done
+          # Uncordon the legacy pool so the cluster is usable again.
+          for N in $(kubectl get nodes -l agentpool!=$TEMP_NODEPOOL -o name 2>/dev/null); do
+            kubectl uncordon "$N" 2>/dev/null || true
+          done
+          # Delete the temp Azure Linux 3 pool. ~3 min; --no-wait so the
+          # workflow can finish while Azure does the teardown asynchronously.
+          if az aks nodepool show -g "$AKS_RG" --cluster-name "$AKS_NAME" -n "$TEMP_NODEPOOL" >/dev/null 2>&1; then
+            echo "Deleting node pool '$TEMP_NODEPOOL' (async)..."
+            az aks nodepool delete \
+              -g "$AKS_RG" --cluster-name "$AKS_NAME" \
+              -n "$TEMP_NODEPOOL" \
+              --no-wait
+          fi
