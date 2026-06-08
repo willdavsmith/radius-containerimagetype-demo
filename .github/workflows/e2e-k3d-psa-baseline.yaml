@@ -38,25 +38,32 @@ jobs:
           curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
           k3d version
 
-      - name: Loosen host sysctls for unprivileged user namespaces
+      - name: Loosen host sysctls and disable docker-default AppArmor
         # Ubuntu 24.04+ (which GHA ubuntu-latest is based on) defaults
-        # kernel.apparmor_restrict_unprivileged_userns=1, which prevents
-        # unprivileged processes inside containers from calling
-        # unshare(CLONE_NEWUSER). The rootless BuildKit sidecar's
-        # rootlesskit shim needs this even when the pod has hostUsers: false
-        # (rootlesskit doesn't yet detect that it's already in a user
-        # namespace). Documented in
-        # https://github.com/moby/buildkit/blob/master/docs/rootless.md
-        # ("Ubuntu, 24.04 or later").
+        # kernel.apparmor_restrict_unprivileged_userns=1 AND ships a
+        # docker-default AppArmor profile that's auto-applied to every
+        # Docker container. Both of these block the rootless BuildKit
+        # sidecar from creating its nested user namespace when running
+        # inside the k3d node container:
+        #   [rootlesskit:parent] error: failed to start the child:
+        #   fork/exec /proc/self/exe: operation not permitted
         #
-        # This is a Linux-distro-level setting that real-world Ubuntu 24.04+
-        # node operators would need to apply too -- it's not specific to
-        # k3d. Also bump user.max_user_namespaces defensively.
+        # 1. Loosen the kernel sysctl. Documented in
+        #    https://github.com/moby/buildkit/blob/master/docs/rootless.md
+        # 2. Unload the docker-default AppArmor profile so the k3d
+        #    container can create user namespaces inside itself. This
+        #    is k3d/kind-specific. Real-cluster nodes (AKS Azure Linux 3,
+        #    EKS AL2023) use SELinux not AppArmor on the host and don't
+        #    have this problem.
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo sysctl -w user.max_user_namespaces=63359
-          echo "Sysctl after:"
-          sysctl kernel.apparmor_restrict_unprivileged_userns user.max_user_namespaces
+          if [ -f /etc/apparmor.d/docker ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/docker || true
+          fi
+          echo "AppArmor profiles after:"
+          sudo aa-status --enabled 2>&1 || true
+          sudo aa-status 2>&1 | grep -i docker || echo "(no docker profile loaded)"
 
       - name: Create k3d cluster
         # K3s v1.34+ embeds containerd 2.x which is required for
@@ -64,20 +71,9 @@ jobs:
         # so rootless BuildKit can satisfy PSA baseline). Pin explicitly
         # so this doesn't silently break if k3d's default image drifts
         # backwards.
-        #
-        # --security-opt apparmor=unconfined disables the docker-default
-        # AppArmor profile on the inner k3d Docker container. Ubuntu 24.04+
-        # docker-default blocks unshare(CLONE_NEWUSER) from inside the
-        # container, which prevents the rootless BuildKit sidecar from
-        # creating its nested user namespace even when the chart sets
-        # hostUsers: false. Real-cluster nodes (AKS Azure Linux 3,
-        # EKS AL2023) don't have this restriction; this flag makes k3d
-        # representative.
         run: |
           k3d cluster create $CLUSTER_NAME \
             --image rancher/k3s:v1.34.1-k3s1 \
-            --k3s-arg '--disable=traefik@server:0' \
-            --k3d-node-arg 'server:--security-opt=apparmor=unconfined' \
             --wait --timeout 180s
           kubectl wait --for=condition=ready node --all --timeout=120s
           kubectl version
