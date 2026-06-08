@@ -1,0 +1,117 @@
+name: E2E (k3d, PSA baseline)
+
+# Validates that the radius chart (including the rootless BuildKit
+# sidecar that backs Radius.Compute/containerImages) deploys cleanly
+# into a namespace under Pod Security Admission "baseline" enforcement,
+# and that the demo app namespace also passes baseline. PSA is a
+# built-in API-server admission plugin enabled by default since K8s
+# 1.25 -- no install required, but it's a no-op unless the namespace
+# is labeled, so the labels below are what actually opts us in.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      CLUSTER_NAME: radius-e2e
+      DYNAMIC_RP_REGISTRY: localhost
+      DYNAMIC_RP_TAG: e2e
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Derive registry path
+        id: registry
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "path=ghcr.io/${REPO}" >> "$GITHUB_OUTPUT"
+
+      - name: Install k3d
+        run: |
+          curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          k3d version
+
+      - name: Create k3d cluster
+        run: |
+          k3d cluster create $CLUSTER_NAME --wait --timeout 120s
+          kubectl wait --for=condition=ready node --all --timeout=120s
+
+      - name: Pre-create namespaces with PSA baseline enforcement
+        # Pre-create radius-system AND the default namespace (which is
+        # where the demo Radius app deploys its containers) so we can
+        # apply the PSA enforce=baseline label before any workloads land.
+        # rad install / Radius app deploy is otherwise a no-op on the
+        # namespace if it already exists.
+        run: |
+          kubectl create namespace radius-system 2>/dev/null || true
+          for NS in radius-system default; do
+            kubectl label ns "$NS" \
+              pod-security.kubernetes.io/enforce=baseline \
+              pod-security.kubernetes.io/enforce-version=latest \
+              pod-security.kubernetes.io/audit=baseline \
+              pod-security.kubernetes.io/warn=baseline \
+              --overwrite
+          done
+          kubectl get ns -L pod-security.kubernetes.io/enforce
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: radius/go.mod
+          cache-dependency-path: radius/go.sum
+
+      - name: Build dynamic-rp image
+        working-directory: radius
+        run: |
+          make docker-build-dynamic-rp \
+            DOCKER_REGISTRY=$DYNAMIC_RP_REGISTRY \
+            DOCKER_TAG_VERSION=$DYNAMIC_RP_TAG
+
+      - name: Side-load images into k3d
+        run: |
+          k3d image import "$DYNAMIC_RP_REGISTRY/dynamic-rp:$DYNAMIC_RP_TAG" -c $CLUSTER_NAME
+          docker pull alpine:3.23
+          k3d image import alpine:3.23 -c $CLUSTER_NAME
+
+      - name: Resolve submodule SHA
+        id: submodule
+        run: echo "sha=$(git -C resource-types-contrib rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run E2E
+        uses: ./.github/actions/radius-e2e
+        with:
+          registry-path: ${{ steps.registry.outputs.path }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          image-tag: ${{ github.sha }}
+          build-source: git::https://github.com/${{ github.repository }}.git//demo/app?ref=${{ github.sha }}
+          containerimages-template-path: git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}
+          containers-template-path: git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${{ steps.submodule.outputs.sha }}
+          dynamic-rp-image: ${{ env.DYNAMIC_RP_REGISTRY }}/dynamic-rp
+          dynamic-rp-tag: ${{ env.DYNAMIC_RP_TAG }}
+
+      - name: Verify no PSA violations were emitted
+        # Failures show up as Warning events with reason "FailedCreate"
+        # or as pods stuck Pending with status "forbidden: violates
+        # PodSecurity". Surface both for easy debugging.
+        if: always()
+        run: |
+          echo "=== Events mentioning PodSecurity in radius-system ==="
+          kubectl get events -n radius-system \
+            --field-selector type=Warning -o wide 2>/dev/null | \
+            grep -i "podsecurity\|forbidden" || echo "(none)"
+          echo "=== Events mentioning PodSecurity in default ==="
+          kubectl get events -n default \
+            --field-selector type=Warning -o wide 2>/dev/null | \
+            grep -i "podsecurity\|forbidden" || echo "(none)"
+
+      - name: Cleanup cluster
+        if: always()
+        run: k3d cluster delete $CLUSTER_NAME 2>/dev/null || true
