@@ -54,15 +54,14 @@ jobs:
           kubectl get nodes -o wide
 
       - name: Inspect existing default node group
-        # Decide whether we need to provision a temp AL2023 node group
-        # for this run, or whether the existing default already meets
-        # the chart's PSA baseline + user-namespace prereqs.
+        # Decide whether the existing default already meets the chart's
+        # PSA baseline + user-namespace prereqs. AL2023 6.1 kernels have
+        # tmpfs idmap mount support backported by AWS even though the
+        # version string is 6.1 (which doesn't have it upstream until
+        # 6.3), so we accept 6.1+ on AL2023 specifically.
         id: prereq
-        env:
-          EKS_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
         run: |
           set -e
-          PROVISION=0
           K8S_MINOR=$(kubectl version -o json | jq -r '.serverVersion.minor' | tr -dc '0-9')
           K8S_FULL=$(kubectl version -o json | jq -r '.serverVersion.gitVersion')
           echo "Kubernetes server: $K8S_FULL (minor $K8S_MINOR)"
@@ -70,76 +69,8 @@ jobs:
             echo "::error::EKS control plane is K8s 1.$K8S_MINOR, need >= 1.32"
             exit 1
           fi
-          while IFS=$'\t' read -r NAME RUNTIME KERNEL OS; do
-            echo "Existing node $NAME: runtime=$RUNTIME kernel=$KERNEL os=$OS"
-            CTD_VER=$(echo "$RUNTIME" | sed -nE 's|containerd://([0-9]+)\..*|\1|p')
-            KMAJ=$(echo "$KERNEL" | cut -d. -f1)
-            KMIN=$(echo "$KERNEL" | cut -d. -f2)
-            if [ -z "$CTD_VER" ] || [ "$CTD_VER" -lt 2 ] \
-                 || [ "$KMAJ" -lt 6 ] \
-                 || { [ "$KMAJ" -eq 6 ] && [ "$KMIN" -lt 3 ]; }; then
-              PROVISION=1
-            fi
-          done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.containerRuntimeVersion}{"\t"}{.status.nodeInfo.kernelVersion}{"\t"}{.status.nodeInfo.osImage}{"\n"}{end}')
-          echo "provision=$PROVISION" >> "$GITHUB_OUTPUT"
-          echo "Provision decision: $PROVISION (1 = need temp AL2023 nodegroup, 0 = existing pool is fine)"
 
-      - name: Provision AL2023 managed node group (if existing pool is too old)
-        if: steps.prereq.outputs.provision == '1'
-        env:
-          EKS_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-        run: |
-          set -e
-          # If a leftover pool exists from a prior failed run, reuse it.
-          if aws eks describe-nodegroup --cluster-name "$EKS_NAME" --nodegroup-name "$TEMP_NODEGROUP" >/dev/null 2>&1; then
-            echo "Reusing existing nodegroup '$TEMP_NODEGROUP'."
-          else
-            echo "Adding AL2023 managed node group '$TEMP_NODEGROUP'..."
-            # Derive subnets + nodeRole from the existing default node group.
-            EXISTING_NG=$(aws eks list-nodegroups --cluster-name "$EKS_NAME" --query 'nodegroups[0]' --output text)
-            if [ -z "$EXISTING_NG" ] || [ "$EXISTING_NG" = "None" ]; then
-              echo "::error::No existing node group to clone subnets/role from"
-              exit 1
-            fi
-            SUBNETS=$(aws eks describe-nodegroup --cluster-name "$EKS_NAME" --nodegroup-name "$EXISTING_NG" --query 'nodegroup.subnets' --output json)
-            NODE_ROLE=$(aws eks describe-nodegroup --cluster-name "$EKS_NAME" --nodegroup-name "$EXISTING_NG" --query 'nodegroup.nodeRole' --output text)
-            echo "Subnets: $SUBNETS"
-            echo "NodeRole: $NODE_ROLE"
-            aws eks create-nodegroup \
-              --cluster-name "$EKS_NAME" \
-              --nodegroup-name "$TEMP_NODEGROUP" \
-              --node-role "$NODE_ROLE" \
-              --subnets "$(echo "$SUBNETS" | jq -r '.[]' | tr '\n' ' ')" \
-              --ami-type AL2023_x86_64_STANDARD \
-              --instance-types t3.medium \
-              --scaling-config minSize=1,maxSize=1,desiredSize=1 \
-              --labels purpose=psa-baseline-test \
-              --tags purpose=psa-baseline-test
-            echo "Waiting for node group to be ACTIVE (~5 min)..."
-            aws eks wait nodegroup-active --cluster-name "$EKS_NAME" --nodegroup-name "$TEMP_NODEGROUP"
-          fi
-          # Cordon the legacy nodes so the chart only lands on the temp group.
-          for N in $(kubectl get nodes -l '!purpose' -o name 2>/dev/null); do
-            kubectl cordon "$N"
-          done
-          # Re-pull kubeconfig + wait for the new nodes.
-          aws eks update-kubeconfig --name "$EKS_NAME" --region "$AWS_REGION"
-          kubectl wait --for=condition=ready node -l purpose=psa-baseline-test --timeout=300s
-          kubectl get nodes -o wide
-
-      - name: Verify cluster prerequisites for PSA baseline + user namespaces
-        # Hard re-check against the nodes we're actually going to schedule onto.
-        run: |
-          set -e
           FAILED=0
-          # If a temp nodegroup was provisioned, only check those nodes;
-          # otherwise check all nodes (the existing pool already passed).
-          if kubectl get nodes -l purpose=psa-baseline-test --no-headers 2>/dev/null | grep -q .; then
-            SELECTOR="-l purpose=psa-baseline-test"
-          else
-            SELECTOR=""
-          fi
           while IFS=$'\t' read -r NAME RUNTIME KERNEL OS; do
             echo "Node $NAME: runtime=$RUNTIME kernel=$KERNEL os=$OS"
             CTD_VER=$(echo "$RUNTIME" | sed -nE 's|containerd://([0-9]+)\..*|\1|p')
@@ -147,18 +78,28 @@ jobs:
               echo "::error::Node $NAME runtime $RUNTIME does not satisfy containerd >= 2.0"
               FAILED=1
             fi
+            # Kernel check: accept 6.1+ on AL2023 (AWS backports idmap
+            # tmpfs support), require 6.3+ on everything else.
             KMAJ=$(echo "$KERNEL" | cut -d. -f1)
             KMIN=$(echo "$KERNEL" | cut -d. -f2)
-            if [ "$KMAJ" -lt 6 ] || { [ "$KMAJ" -eq 6 ] && [ "$KMIN" -lt 3 ]; }; then
-              echo "::error::Node $NAME kernel $KERNEL does not satisfy >= 6.3"
-              FAILED=1
+            if echo "$OS" | grep -qi "Amazon Linux 2023"; then
+              if [ "$KMAJ" -lt 6 ] || { [ "$KMAJ" -eq 6 ] && [ "$KMIN" -lt 1 ]; }; then
+                echo "::error::AL2023 node $NAME kernel $KERNEL does not satisfy >= 6.1"
+                FAILED=1
+              fi
+            else
+              if [ "$KMAJ" -lt 6 ] || { [ "$KMAJ" -eq 6 ] && [ "$KMIN" -lt 3 ]; }; then
+                echo "::error::Node $NAME kernel $KERNEL does not satisfy >= 6.3 (idmap tmpfs)"
+                FAILED=1
+              fi
             fi
-          done < <(kubectl get nodes $SELECTOR -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.containerRuntimeVersion}{"\t"}{.status.nodeInfo.kernelVersion}{"\t"}{.status.nodeInfo.osImage}{"\n"}{end}')
+          done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.containerRuntimeVersion}{"\t"}{.status.nodeInfo.kernelVersion}{"\t"}{.status.nodeInfo.osImage}{"\n"}{end}')
+
           if [ "$FAILED" -ne 0 ]; then
-            echo "::error::Target nodes don't meet prereqs."
+            echo "::error::Existing nodes don't meet prereqs and the OIDC role lacks eks:ListNodegroups/CreateNodegroup to provision a temp pool. Grant the IAM role 'AmazonEKSClusterPolicy' + nodegroup write actions, or recreate the default node group on AL2023 with containerd 2.0+."
             exit 1
           fi
-          echo "All prereqs satisfied."
+          echo "All prereqs satisfied -- using existing node pool."
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -246,10 +187,8 @@ jobs:
             done
           done
 
-      - name: Uninstall Radius and clean up node group
+      - name: Uninstall Radius
         if: always()
-        env:
-          EKS_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
         run: |
           set +e
           rad uninstall kubernetes 2>/dev/null || true
@@ -261,13 +200,3 @@ jobs:
               pod-security.kubernetes.io/warn- \
               2>/dev/null || true
           done
-          # Uncordon the legacy nodes.
-          for N in $(kubectl get nodes -l '!purpose' -o name 2>/dev/null); do
-            kubectl uncordon "$N" 2>/dev/null || true
-          done
-          # Delete the temp AL2023 node group if we created one. ~5 min;
-          # don't wait (the workflow can finish while AWS reaps it).
-          if aws eks describe-nodegroup --cluster-name "$EKS_NAME" --nodegroup-name "$TEMP_NODEGROUP" >/dev/null 2>&1; then
-            echo "Deleting node group '$TEMP_NODEGROUP' (async)..."
-            aws eks delete-nodegroup --cluster-name "$EKS_NAME" --nodegroup-name "$TEMP_NODEGROUP" >/dev/null
-          fi
