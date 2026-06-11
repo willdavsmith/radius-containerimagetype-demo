@@ -3,8 +3,11 @@
 ## Platform Engineer — one-time
 
 ```bash
-# 1. Install Radius.
-rad install kubernetes
+# 1. Install Radius with the BuildKit sidecar opted in.
+#    The sidecar is required for Radius.Compute/containerImages and
+#    requires PSA "privileged" on radius-system (default for unlabeled
+#    namespaces). See deploy/Chart/PSA-NOTES.md for details.
+rad install kubernetes --set dynamicrp.buildkit.enabled=true
 rad workspace create kubernetes default \
   --context "$(kubectl config current-context)" --group default
 rad workspace switch default
@@ -14,20 +17,16 @@ rad resource-type create -f Security/secrets/secrets.yaml
 rad resource-type create -f Compute/containerImages/containerImages.yaml
 rad resource-type create -f Compute/containers/containers.yaml
 
-# 3. Deploy platform.bicep — declares the recipePack (which registers
+# 3. Deploy platform.bicep. Declares the recipePack (which registers
 #    the containerImages + containers recipes) and the env.
 rad deploy platform.bicep \
   -p registryPath="ghcr.io/my-org"
 
-# 4. Deploy secrets.bicep — declares the registry credentials secret.
+# 4. Deploy secrets.bicep. Declares the registry credentials secret.
 rad deploy secrets.bicep \
   -p registryUsername="$GHCR_USER" \
   -p registryPassword="$GHCR_TOKEN"
 ```
-
-> Operators enforcing PSA `restricted` cluster-wide on K8s ≥ 1.30
-> with `UserNamespacesSupport` may opt into the stricter sidecar
-> profile via `--set dynamicrp.buildkit.psaMode=restricted`.
 
 `platform.bicep`:
 
