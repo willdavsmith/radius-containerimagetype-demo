@@ -62,6 +62,11 @@ jobs:
           kubectl delete ns radius-system --wait=false --ignore-not-found 2>/dev/null || true
           kubectl delete deployment,statefulset,daemonset,svc,httproute -n default \
             -l radapp.io/application --ignore-not-found 2>/dev/null || true
+          # Stale Radius-managed secrets in user workload namespaces
+          # (e.g. ghcr-creds from a Radius.Security/secrets resource)
+          # collide with the new recipe's create. Recipe doesn't yet
+          # adopt existing secrets, so wipe.
+          kubectl delete secret ghcr-creds -n default --ignore-not-found 2>/dev/null || true
 
           # Wait up to 60s for graceful termination first.
           for i in $(seq 1 12); do
