@@ -45,13 +45,20 @@ jobs:
         # default. A new helm install can deadlock waiting for the
         # old dynamic-rp ReplicaSet to roll, so wipe wholesale.
         #
-        # radius-system has CRD finalizers that block namespace
-        # termination once their controller is gone (which happens
-        # mid-uninstall). Force-strip finalizers if the namespace
-        # is still Terminating after 60s.
+        # Extra hazards on shared clusters: stale APIServices and CRDs
+        # block both namespace cleanup (kube-controller-manager can't
+        # finish discovery against a dead aggregated API) and fresh
+        # installs (Helm's APIService upgrade returns 503 if the
+        # backing service hasn't come up yet on the new install).
         run: |
           set +e
           rad uninstall kubernetes 2>/dev/null || true
+
+          # Delete the stale UCP APIService so kube-aggregator stops
+          # routing /apis/api.ucp.dev to a dead service. The new install
+          # will recreate it.
+          kubectl delete apiservice v1alpha3.api.ucp.dev --ignore-not-found 2>/dev/null || true
+
           kubectl delete ns radius-system --wait=false --ignore-not-found 2>/dev/null || true
           kubectl delete deployment,statefulset,daemonset,svc,httproute -n default \
             -l radapp.io/application --ignore-not-found 2>/dev/null || true
@@ -68,14 +75,11 @@ jobs:
             kubectl get ns radius-system -o json \
               | jq '.spec.finalizers=[] | .metadata.finalizers=[]' \
               | kubectl replace --raw "/api/v1/namespaces/radius-system/finalize" -f -
-            # Find any remaining resources with finalizers in the ns
-            # and strip those too.
-            for kind in $(kubectl api-resources --verbs=list --namespaced -o name); do
+            for kind in $(kubectl api-resources --verbs=list --namespaced -o name 2>/dev/null); do
               kubectl get "$kind" -n radius-system -o name 2>/dev/null | while read res; do
                 kubectl patch "$res" -n radius-system --type=merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
               done
             done
-            # Wait again for the unstuck namespace to disappear.
             for i in $(seq 1 12); do
               kubectl get ns radius-system 2>/dev/null || break
               sleep 5
