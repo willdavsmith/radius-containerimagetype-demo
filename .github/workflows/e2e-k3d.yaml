@@ -67,7 +67,7 @@ jobs:
           image-tag: ${{ github.sha }}
           build-source: git::https://github.com/${{ github.repository }}.git//demo/app?ref=${{ github.sha }}
           containerimages-template-path: git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containerImages/recipes/kubernetes/terraform?ref=${{ github.sha }}
-          containers-template-path: git::https://github.com/radius-project/resource-types-contrib.git//Compute/containers/recipes/kubernetes/terraform?ref=${{ steps.submodule.outputs.sha }}
+          containers-template-path: git::https://github.com/${{ github.repository }}.git//resource-types-contrib/Compute/containers/recipes/kubernetes/terraform?ref=${{ github.sha }}
           dynamic-rp-image: ${{ env.DYNAMIC_RP_REGISTRY }}/dynamic-rp
           dynamic-rp-tag: ${{ env.DYNAMIC_RP_TAG }}
 
