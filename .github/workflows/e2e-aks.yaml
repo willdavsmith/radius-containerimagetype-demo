@@ -45,16 +45,41 @@ jobs:
         # AKS is a long-lived shared cluster. Prior runs leave stale
         # pods/replicasets in radius-system + leftover demo apps in
         # default. Wipe wholesale before a new install.
+        #
+        # radius-system has CRD finalizers that block namespace
+        # termination once their controller is gone (which happens
+        # mid-uninstall). Force-strip finalizers if the namespace
+        # is still Terminating after 60s.
         run: |
           set +e
           rad uninstall kubernetes 2>/dev/null || true
           kubectl delete ns radius-system --wait=false --ignore-not-found 2>/dev/null || true
           kubectl delete deployment,statefulset,daemonset,svc,httproute -n default \
             -l radapp.io/application --ignore-not-found 2>/dev/null || true
-          for i in $(seq 1 30); do
+
+          # Wait up to 60s for graceful termination first.
+          for i in $(seq 1 12); do
             kubectl get ns radius-system 2>/dev/null || break
             sleep 5
           done
+
+          # Force-finalize if still stuck.
+          if kubectl get ns radius-system 2>/dev/null; then
+            echo "radius-system stuck Terminating; force-stripping finalizers..."
+            kubectl get ns radius-system -o json \
+              | jq '.spec.finalizers=[] | .metadata.finalizers=[]' \
+              | kubectl replace --raw "/api/v1/namespaces/radius-system/finalize" -f -
+            for kind in $(kubectl api-resources --verbs=list --namespaced -o name); do
+              kubectl get "$kind" -n radius-system -o name 2>/dev/null | while read res; do
+                kubectl patch "$res" -n radius-system --type=merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
+              done
+            done
+            for i in $(seq 1 12); do
+              kubectl get ns radius-system 2>/dev/null || break
+              sleep 5
+            done
+          fi
+          kubectl get ns radius-system 2>/dev/null && echo "still stuck after force-strip" || echo "namespace cleared"
           set -e
 
       - name: Set up Go
