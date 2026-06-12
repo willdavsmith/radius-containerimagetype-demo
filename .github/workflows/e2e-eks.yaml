@@ -62,6 +62,11 @@ jobs:
           kubectl delete ns radius-system --wait=false --ignore-not-found 2>/dev/null || true
           kubectl delete deployment,statefulset,daemonset,svc,httproute -n default \
             -l radapp.io/application --ignore-not-found 2>/dev/null || true
+          # Stale demo workloads by name (in case label-based delete
+          # missed them, e.g. from older Radius versions with different
+          # label conventions).
+          kubectl delete deployment demo -n default --ignore-not-found 2>/dev/null || true
+          kubectl delete service demo-demo -n default --ignore-not-found 2>/dev/null || true
           # Stale Radius-managed secrets in user workload namespaces
           # (e.g. ghcr-creds from a Radius.Security/secrets resource)
           # collide with the new recipe's create. Recipe doesn't yet
