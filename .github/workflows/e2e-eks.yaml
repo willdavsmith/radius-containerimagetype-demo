@@ -39,6 +39,24 @@ jobs:
             --region "${{ secrets.AWS_REGION }}"
           kubectl get nodes
 
+      - name: Clean stale Radius state from prior runs
+        # EKS is a long-lived shared cluster. Prior runs leave stale
+        # pods/replicasets in radius-system + leftover demo apps in
+        # default. A new helm install can deadlock waiting for the
+        # old dynamic-rp ReplicaSet to roll, so wipe wholesale.
+        run: |
+          set +e
+          rad uninstall kubernetes 2>/dev/null || true
+          kubectl delete ns radius-system --wait=false --ignore-not-found 2>/dev/null || true
+          kubectl delete deployment,statefulset,daemonset,svc,httproute -n default \
+            -l radapp.io/application --ignore-not-found 2>/dev/null || true
+          # Wait for radius-system to fully go before reinstall tries to recreate it.
+          for i in $(seq 1 30); do
+            kubectl get ns radius-system 2>/dev/null || break
+            sleep 5
+          done
+          set -e
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
